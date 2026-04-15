@@ -4,11 +4,14 @@ import sys
 import time
 import readline
 
-#modules
+#File Path Resolver
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+#Modules
 from modules.scanner import scanner
 
 COMMANDS = {
-    "fileScanner" : (scanner, "File Scanner ")
+    "scanner" : (scanner, "File Scanner ")
 }
 
 def Help():
@@ -41,6 +44,12 @@ def Terminal():
             pass
         except KeyboardInterrupt:
             print("ZeroShiel > Exiting the program")
+            exit()
         except EOFError:
             print("ZeroShiel > Exiting the program")
+            exit()
         
+def main():
+    Terminal()
+if __name__ == "__main__":
+    main()
