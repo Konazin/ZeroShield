@@ -15,7 +15,10 @@ COMMANDS = {
 }
 
 def Help():
-    print("olá")
+    for command, (_, descritions) in COMMANDS.items():
+        print(f"{command:}   {descritions}")
+    print("  help            Show this help message")
+    print("  quit / exit     Exit the program\n")
 
 def Terminal():
     while True:

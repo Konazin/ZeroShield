@@ -1,4 +1,4 @@
+import os
+import shutil
+import hashlib
 
-
-def scanner():
-    print("scanner rodando...")
