@@ -89,12 +89,18 @@ sudo install -Dm755 target/release/zeroshieldd /usr/bin/zeroshieldd
 sudo install -Dm644 packaging/config.toml -t /etc/zeroshield/
 sudo install -Dm644 packaging/systemd/zeroshieldd.service \
     packaging/systemd/zeroshield-scan.service \
-    packaging/systemd/zeroshield-scan.timer -t /usr/lib/systemd/system/
+    packaging/systemd/zeroshield-scan.timer \
+    packaging/systemd/zeroshield-metrics.service \
+    packaging/systemd/zeroshield-metrics.timer -t /usr/lib/systemd/system/
 sudo install -Dm644 packaging/tmpfiles/zeroshield.conf -t /usr/lib/tmpfiles.d/
 sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/zeroshield.conf
 sudo systemctl daemon-reload
 sudo systemctl enable --now zeroshieldd
 ```
+
+Opcional: `sudo systemctl enable --now zeroshield-metrics.timer` grava
+`/var/lib/zeroshield/metrics.prom` a cada 5 minutos (formato texto do
+Prometheus, pronto para o *textfile collector* do node_exporter).
 
 Pacotes: `packaging/nfpm.yaml` gera `.deb`/`.rpm` com
 [nfpm](https://nfpm.goreleaser.com/); `packaging/arch/PKGBUILD` gera o pacote
@@ -139,12 +145,31 @@ zeroshield net dns              # fragmento de sinkhole (dnsmasq/unbound)
 zeroshield events -n 50
 zeroshield events --follow      # stream ao vivo do daemon
 
+# relatórios (json | csv | html)
+zeroshield report                                # últimos 7 dias
+zeroshield report --days 30 --format csv --section scans
+zeroshield report --format html --out /tmp/zeroshield.html
+
+# métricas (Prometheus | journald | json)
+zeroshield metrics --format prometheus
+zeroshield metrics --format journald
+zeroshield metrics --format prometheus --out /var/lib/zeroshield/metrics.prom
+
+# TUI para servidores (somente leitura + ações; requer o daemon)
+zeroshield tui
+
 # shell interativo
 zeroshield shell
 ```
 
 O scan retorna **código de saída 2** quando encontra ameaças (como o `grep`),
 facilitando o uso em scripts e timers.
+
+A TUI (`zeroshield tui`) segue o daemon ao vivo (~3 s + eventos em tempo real):
+`1..6`/`Tab` trocam de aba (Overview, Events, Findings, Quarantine, Processes,
+Net), `Enter` abre os detalhes, `s` dispara um scan, `x`/`X` restauram/purgam
+uma entrada da quarentena, `p` pausa o follow, `?` mostra a ajuda. Sem o daemon
+ela mostra a tela de espera e continua tentando reconectar.
 
 Sem o daemon rodando, a CLI funciona em **modo local** (`--local` força), útil
 para escanear máquinas sem systemd ou dentro de contêineres.
@@ -220,6 +245,8 @@ from zeroshield_sdk import Client
 with Client() as zs:          # usa $ZS_SOCKET ou o caminho padrão
     print(zs.status())
     report = zs.scan("/tmp/arquivo")
+    print(zs.report(days=30)["summary"])
+    print(zs.metrics()["up"])
     for event in zs.watch():
         print(event)
 ```
@@ -236,9 +263,9 @@ python3 -m unittest discover -s python/tests
 ```
 
 O workspace separa o núcleo em crates (`zs-core`, `zs-ipc`, `zs-scan`,
-`zs-watch`, `zs-proc`, `zs-net`, `zs-cli`, `zs-daemon`, `zs-gui`), com testes
-unitários em cada um. A CI roda fmt, clippy, testes no Debian (trixie) e Arch,
-build da GUI com GTK4 e os testes do SDK Python — veja
+`zs-watch`, `zs-proc`, `zs-net`, `zs-report`, `zs-cli`, `zs-tui`, `zs-daemon`,
+`zs-gui`), com testes unitários em cada um. A CI roda fmt, clippy, testes no
+Debian (trixie) e Arch, build da GUI com GTK4 e os testes do SDK Python — veja
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ## Roadmap
@@ -252,7 +279,8 @@ build da GUI com GTK4 e os testes do SDK Python — veja
 - [x] **M6** Empacotamento (deb via nfpm, PKGBUILD, systemd, CI)
 - [x] **M7** Tempo real (inotify, cache de arquivos limpos, scan de mídia
       removível; validação com USB real pendente)
-- [ ] **M8** TUI + relatórios
+- [x] **M8** TUI + relatórios (ratatui, json/csv/html, métricas
+      Prometheus/journald; validação de UX em terminal real pendente)
 - [ ] **M9** Hardening, polkit, eBPF e v1.0
 
 Detalhes em [`docs/roadmap.md`](docs/roadmap.md).

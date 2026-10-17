@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
-use commands::{Ctx, ScanArgs};
+use commands::{Ctx, MetricsArgs, ReportArgs, ScanArgs};
 use zs_core::error::ZsResult;
 
 #[derive(Parser, Debug)]
@@ -77,6 +77,15 @@ enum Command {
         limit: u32,
     },
 
+    /// Build a report (JSON, CSV or self-contained HTML)
+    Report(ReportCmd),
+
+    /// Export metrics (Prometheus text or journald lines)
+    Metrics(MetricsCmd),
+
+    /// Terminal user interface (requires the daemon)
+    Tui,
+
     /// List engine modules
     Modules,
 
@@ -131,6 +140,44 @@ enum ProcAction {
     },
     /// Watch for new suspicious processes
     Watch,
+}
+
+#[derive(Args, Debug)]
+struct ReportCmd {
+    /// Output format
+    #[arg(long, value_parser = ["json", "csv", "html"], default_value = "json")]
+    format: String,
+
+    /// Include records from the last N days (0 = all time)
+    #[arg(long, default_value_t = 7)]
+    days: u32,
+
+    /// Maximum rows per section
+    #[arg(long, default_value_t = 1000)]
+    limit: u32,
+
+    /// CSV only: table to export (findings, scans, events, quarantine)
+    #[arg(long, value_name = "TABLE")]
+    section: Option<String>,
+
+    /// Write to FILE instead of stdout
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct MetricsCmd {
+    /// Output format
+    #[arg(
+        long,
+        value_parser = ["prometheus", "journald"],
+        default_value = "prometheus"
+    )]
+    format: String,
+
+    /// Write to FILE instead of stdout
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -366,6 +413,35 @@ async fn run_command(ctx: &Ctx, cli: Cli) -> ZsResult<i32> {
             commands::cmd_findings(ctx, limit).await?;
             Ok(0)
         }
+        Some(Command::Report(cmd)) => {
+            commands::cmd_report(
+                ctx,
+                ReportArgs {
+                    format: cmd.format,
+                    days: cmd.days,
+                    limit: cmd.limit,
+                    section: cmd.section,
+                    out: cmd.out,
+                },
+            )
+            .await?;
+            Ok(0)
+        }
+        Some(Command::Metrics(cmd)) => {
+            commands::cmd_metrics(
+                ctx,
+                MetricsArgs {
+                    format: cmd.format,
+                    out: cmd.out,
+                },
+            )
+            .await?;
+            Ok(0)
+        }
+        Some(Command::Tui) => {
+            zs_tui::run(ctx.paths.socket_path()).await?;
+            Ok(0)
+        }
         Some(Command::Modules) => {
             commands::cmd_modules(ctx).await?;
             Ok(0)
@@ -401,7 +477,7 @@ async fn shell(ctx: &Ctx) {
             "exit" | "quit" => break,
             "help" => {
                 println!(
-                    "commands:\n  status\n  scan <path> [--quarantine] [--min-score N]\n  proc list [--min-score N]\n  proc watch\n  watch <dirs...> [-q] [--detach|--list|--stop]\n  quarantine list|restore <id>|purge <id>\n  rules list|check <file>|import <file>\n  net status|audit <targets...>|feeds update|feeds list|apply|dns\n  events [-n N] [--follow]\n  findings [-n N]\n  modules\n  clear\n  exit"
+                    "commands:\n  status\n  scan <path> [--quarantine] [--min-score N]\n  proc list [--min-score N]\n  proc watch\n  watch <dirs...> [-q] [--detach|--list|--stop]\n  quarantine list|restore <id>|purge <id>\n  rules list|check <file>|import <file>\n  net status|audit <targets...>|feeds update|feeds list|apply|dns\n  events [-n N] [--follow]\n  findings [-n N]\n  report [--format json|csv|html] [--days N] [--out FILE]\n  metrics [--format prometheus|journald] [--out FILE]\n  tui\n  modules\n  clear\n  exit"
                 );
                 continue;
             }

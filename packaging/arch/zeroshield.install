@@ -6,6 +6,8 @@ post_install() {
 ==> ZeroShield installed.
     Start the daemon with:      systemctl enable --now zeroshieldd
     Enable the daily scan with: systemctl enable --now zeroshield-scan.timer
+    Prometheus metrics (optional, node_exporter textfile collector):
+                                systemctl enable --now zeroshield-metrics.timer
     The network guard starts in audit mode; nothing is blocked until you
     opt in via /etc/zeroshield/config.toml (netguard.mode = "block")
     and `zeroshield net apply --yes`.
@@ -19,6 +21,7 @@ post_upgrade() {
 pre_remove() {
     if [ -d /run/systemd/system ]; then
         systemctl disable --now zeroshield-scan.timer >/dev/null 2>&1 || true
+        systemctl disable --now zeroshield-metrics.timer >/dev/null 2>&1 || true
         systemctl stop zeroshieldd.service >/dev/null 2>&1 || true
     fi
     true

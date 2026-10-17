@@ -185,6 +185,28 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(seen[2][1]["paths"], ["/tmp/w"])
         daemon.join(timeout=5)
 
+    def test_report_and_metrics_params(self) -> None:
+        seen = []
+
+        def responder(request):
+            seen.append((request["method"], request["params"]))
+            result = (
+                {"summary": {"scans_total": 3}}
+                if request["method"] == "report.get"
+                else {"up": True, "metrics": []}
+            )
+            return [{"id": request["id"], "ok": True, "result": result}]
+
+        path, daemon = self._serve([responder, responder])
+        with Client(path=path) as client:
+            report = client.report(days=30, limit=50)
+            metrics = client.metrics()
+        self.assertEqual(report["summary"]["scans_total"], 3)
+        self.assertTrue(metrics["up"])
+        self.assertEqual(seen[0], ("report.get", {"days": 30, "limit": 50}))
+        self.assertEqual(seen[1], ("metrics.get", {}))
+        daemon.join(timeout=5)
+
     def test_unreachable_socket_raises(self) -> None:
         client = Client(path="/tmp/zeroshield-does-not-exist.sock")
         with self.assertRaises(DaemonUnavailable):

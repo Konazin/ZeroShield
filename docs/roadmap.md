@@ -93,11 +93,19 @@ falta.
 - [ ] Validação em máquina com USB real / montagem FUSE
 - [ ] fanotify (precisa de `CAP_SYS_ADMIN`; inotify cobre o caso comum)
 
-## M8 — TUI e relatórios
+## M8 — TUI e relatórios ✅ (código) / pendente de validação
 
-- [ ] TUI (ratatui) para uso em servidores
-- [ ] Relatórios `--format json|csv|html`
-- [ ] Exportação de métricas (Prometheus/journald)
+- [x] TUI (ratatui) para servidores: abas Overview/Events/Findings/Quarantine/
+      Processes/Net, follow ao vivo (~3 s + eventos via `watch.start`),
+      detalhes por linha, scan e restore/purge de quarentena na própria TUI,
+      tela de espera com reconexão automática quando o daemon está fora
+- [x] Relatórios `--format json|csv|html` (`zeroshield report`; CSV por
+      `--section findings|scans|events|quarantine`; HTML autocontido, sem JS),
+      via daemon (`report.get`) ou modo local
+- [x] Exportação de métricas Prometheus/journald (`zeroshield metrics`;
+      `zeroshield-metrics.timer` grava `/var/lib/zeroshield/metrics.prom`
+      para o textfile collector do node_exporter)
+- [ ] Validação de UX da TUI em terminal real e uso prolongado em servidor
 
 ## M9 — Hardening e v1.0
 

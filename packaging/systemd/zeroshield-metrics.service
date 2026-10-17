@@ -1,0 +1,16 @@
+[Unit]
+Description=Write ZeroShield metrics for Prometheus (node_exporter textfile collector)
+Documentation=https://github.com/Konazin/ZeroShield
+After=zeroshieldd.service
+# Deliberately not Requires/Wants=zeroshieldd.service: when the daemon is
+# down, `zeroshield_up 0` is still written so dashboards stay truthful.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/zeroshield metrics --format prometheus --out /var/lib/zeroshield/metrics.prom
+User=root
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/zeroshield
+PrivateTmp=yes

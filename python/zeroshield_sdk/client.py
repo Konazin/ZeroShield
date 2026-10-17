@@ -135,6 +135,16 @@ class Client:
     def modules(self) -> Dict[str, Any]:
         return self.call("modules")
 
+    def report(self, days: int = 7, limit: int = 1000) -> Dict[str, Any]:
+        """Aggregated data for reports: summary, scans, findings, events and
+        quarantine entries from the last ``days`` days (RPC ``report.get``)."""
+        return self.call("report.get", {"days": days, "limit": limit})
+
+    def metrics(self) -> Dict[str, Any]:
+        """Daemon metric set used by the Prometheus/journald exporters
+        (RPC ``metrics.get``)."""
+        return self.call("metrics.get")
+
     def scan(self, target: str, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Run a scan and return the final report (events are skipped)."""
         params: Dict[str, Any] = {"target": target}

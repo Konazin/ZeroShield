@@ -43,6 +43,10 @@ package() {
         "$pkgdir/usr/lib/systemd/system/zeroshield-scan.service"
     install -Dm644 packaging/systemd/zeroshield-scan.timer \
         "$pkgdir/usr/lib/systemd/system/zeroshield-scan.timer"
+    install -Dm644 packaging/systemd/zeroshield-metrics.service \
+        "$pkgdir/usr/lib/systemd/system/zeroshield-metrics.service"
+    install -Dm644 packaging/systemd/zeroshield-metrics.timer \
+        "$pkgdir/usr/lib/systemd/system/zeroshield-metrics.timer"
     install -Dm644 packaging/tmpfiles/zeroshield.conf \
         "$pkgdir/usr/lib/tmpfiles.d/zeroshield.conf"
 

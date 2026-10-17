@@ -234,6 +234,29 @@ pub struct ScanReport {
     pub cached: u64,
 }
 
+/// A persisted scan row (from the `scans` table), used by reports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanRow {
+    pub id: String,
+    pub ts: i64,
+    pub target: String,
+    pub files: u64,
+    pub bytes: u64,
+    pub findings: u64,
+    pub max_score: u32,
+    pub duration_ms: u64,
+}
+
+/// A persisted finding row: the finding plus its storage metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindingRow {
+    pub id: i64,
+    pub ts: i64,
+    pub scan_id: Option<String>,
+    #[serde(flatten)]
+    pub finding: Finding,
+}
+
 impl ScanReport {
     pub fn summary(&self) -> ScanSummary {
         ScanSummary {

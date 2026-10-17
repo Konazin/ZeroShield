@@ -135,6 +135,8 @@ async fn dispatch(state: Arc<State>, method: &str, params: Value, tx: FrameTx) -
         methods::WATCH_FS_START => watch_fs_start(&state, params),
         methods::WATCH_FS_STOP => watch_fs_stop(&state, params),
         methods::WATCH_FS_LIST => Ok(json!({ "sessions": state.watches.list() })),
+        methods::REPORT_GET => report_get(&state, params),
+        methods::METRICS_GET => metrics_get(&state),
         other => Err(ZsError::Ipc(format!("unknown method '{other}'"))),
     }
 }
@@ -195,6 +197,46 @@ fn watch_fs_stop(state: &Arc<State>, params: Value) -> ZsResult<Value> {
     };
     let stopped = state.watches.stop(selection);
     Ok(json!({ "stopped": stopped, "sessions": state.watches.list() }))
+}
+
+fn report_get(state: &Arc<State>, params: Value) -> ZsResult<Value> {
+    let opts = zs_report::ReportOptions {
+        days: params
+            .get("days")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(7)
+            .min(3650) as u32,
+        limit: params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1000)
+            .clamp(1, 10_000) as u32,
+    };
+    let data = zs_report::collect(&state.storage, &state.version, opts)?;
+    Ok(serde_json::to_value(&data)?)
+}
+
+fn metrics_get(state: &Arc<State>) -> ZsResult<Value> {
+    let storage = &state.storage;
+    let input = zs_report::MetricsInput {
+        up: true,
+        version: state.version.clone(),
+        uptime_secs: (now_secs() - state.started_at).max(0) as u64,
+        scans_total: storage.scan_count()?,
+        threats_total: storage.threat_count()?,
+        findings_total: storage.finding_count()?,
+        quarantine_entries: state.quarantine.list()?.len() as u64,
+        signatures_total: storage.signature_count()?,
+        rules_total: state.scanner.rules().len() as u64,
+        clean_cache_entries: storage.clean_cache_len().unwrap_or(0),
+        watch_sessions: state.watches.session_count() as u64,
+        watched_dirs: state.watches.watched_dirs_total(),
+        net_rules_total: state.netguard.net_status()?.rule_count,
+        procmon_processes: zs_proc::procinfo::list_pids().len() as u64,
+        events_by_severity: storage.event_counts_by_severity()?,
+    };
+    let set = zs_report::collect_metrics(&input);
+    Ok(serde_json::to_value(&set)?)
 }
 
 async fn modules(state: &Arc<State>) -> ZsResult<Value> {

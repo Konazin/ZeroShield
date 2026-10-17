@@ -44,6 +44,10 @@ contents:
     dst: /usr/lib/systemd/system/zeroshield-scan.service
   - src: packaging/systemd/zeroshield-scan.timer
     dst: /usr/lib/systemd/system/zeroshield-scan.timer
+  - src: packaging/systemd/zeroshield-metrics.service
+    dst: /usr/lib/systemd/system/zeroshield-metrics.service
+  - src: packaging/systemd/zeroshield-metrics.timer
+    dst: /usr/lib/systemd/system/zeroshield-metrics.timer
 
   - src: packaging/tmpfiles/zeroshield.conf
     dst: /usr/lib/tmpfiles.d/zeroshield.conf

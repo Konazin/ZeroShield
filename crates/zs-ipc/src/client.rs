@@ -50,7 +50,7 @@ impl Client {
         method: &str,
         params: serde_json::Value,
         timeout: Option<Duration>,
-        on_event: &mut dyn FnMut(Event),
+        on_event: &mut (dyn FnMut(Event) + Send),
     ) -> ZsResult<Response> {
         let id = self.next_id;
         self.next_id += 1;

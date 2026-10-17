@@ -42,7 +42,9 @@ contêiner, mas todas as decisões e o estado vivem no mesmo código de crate.
 | `zs-watch`  | Tempo real: watcher inotify (recursivo, debounce) e observador de `/proc/mounts` para mídia removível |
 | `zs-proc`   | Leitura de `/proc`, heurísticas de pontuação de processos, watcher por polling |
 | `zs-net`    | Parsing de feeds, lógica block/allow (IP/CIDR/domínio), geração de ruleset nftables, fragmentos DNS (dnsmasq/Unbound), NetGuard |
+| `zs-report` | Coleta e renderização de relatórios (JSON/CSV/HTML) e catálogo/render de métricas (Prometheus/journald) |
 | `zs-cli`    | Comandos, renderização, shell interativo (`zeroshield`)               |
+| `zs-tui`    | Cliente TUI (ratatui) do daemon: abas, follow ao vivo, ações           |
 | `zs-daemon` | Bootstrap, logging, dispatch IPC, loop do watcher (`zeroshieldd`)      |
 | `zs-gui`    | Cliente GTK4/libadwaita (`zeroshield-gui`)                             |
 
@@ -74,9 +76,9 @@ Cada frame é uma linha JSON:
 
 Métodos: `status`, `modules`, `scan.run`, `proc.list`, `proc.audit`,
 `quarantine.list|restore|purge`, `sigs.import`, `rules.list`,
-`events.list`, `findings.list`, `net.status`, `net.audit`,
-`net.feeds.update`, `net.apply`, `net.dns`, `watch.start`,
-`watch.fs.start|stop|list`, `daemon.shutdown`.
+`events.list`, `findings.list`, `report.get`, `metrics.get`,
+`net.status`, `net.audit`, `net.feeds.update`, `net.apply`, `net.dns`,
+`watch.start`, `watch.fs.start|stop|list`, `daemon.shutdown`.
 
 ## Fluxo de uma varredura
 
@@ -180,6 +182,55 @@ SQLite (rusqlite com `bundled`), caminho `$ZS_DATA_DIR/zeroshield.db`
 | `quarantine`  | entradas de quarentena (id, caminho original, modo)  |
 | `net_rules`   | regras de rede (ip/cidr/domain + origem)             |
 | `meta`        | versão de schema e carimbos                          |
+
+## Relatórios e métricas (zs-report)
+
+O crate `zs-report` não fala IPC: ele recebe dados já coletados e os
+transforma. Duas frentes:
+
+- **Relatórios** (`zeroshield report`): `ReportOptions { days, limit }`
+  (dias ≤ 3650, limite 1..=10000) alimentam `collect()`, que monta
+  `ReportData { generated_at, version, host, summary, scans, findings }` a
+  partir do `Storage`. A renderização tem três formatos — JSON, CSV (RFC 4180
+  com `--section findings|scans|events|quarantine`) e HTML autocontido (CSS
+  inline, sem JavaScript e sem template engine). O daemon expõe a mesma
+  coleta como `report.get`, expondo contagens de eventos por severidade;
+- **Métricas** (`zeroshield metrics`): `MetricsInput` → `MetricSet` → render
+  Prometheus (texto 0.0.4 com `HELP`/`TYPE` uma vez por família e labels
+  escapados) ou journald (`k=v` em uma linha). Catálogo `zeroshield_*`:
+  `up`, `info`, `uptime_seconds`, `scans_total`, `threats_total`,
+  `findings_total`, `quarantine_entries`, `signatures_total`, `rules_total`,
+  `clean_cache_entries`, `watch_sessions`, `watched_dirs`, `net_rules`,
+  `procmon_processes`, `events_total{severity=...}`.
+
+Via daemon, os valores vêm do estado vivo (`metrics.get` inclui
+`scanner.rules()`, sessões de watch, regras nftables e contagem de processos);
+em modo local a coleta usa o mesmo `Storage`, mas marca `zeroshield_up 0` para
+não mentir sobre o daemon. O `zeroshield-metrics.timer` grava
+`/var/lib/zeroshield/metrics.prom` a cada 5 min para o textfile collector do
+node_exporter.
+
+## TUI (zs-tui)
+
+`zeroshield tui` é um cliente puro do daemon (sem modo local). O estado
+(`App`) é separado da coleta (`data.rs`):
+
+- **Poller**: a cada ~3 s (mínimo de 1 s entre refreshes) coleta `status` +
+  `events.list` sempre e, apenas para a aba visível, a seção correspondente
+  (`findings.list`, `quarantine.list`, `proc.list`, `net.status`) — abas
+  pesadas não custam nada quando fechadas;
+- **Streamer**: mantém uma conexão dedicada em `watch.start`; cada evento do
+  broadcast incrementa o contador de novidades e acorda o poller
+  (debounce), dando follow "instantâneo" sem polling agressivo;
+- **Scan**: `s` abre o input; o `scan.run` roda em outra conexão dedicada, o
+  que permite consumir os eventos `scan_progress` (que são exclusivos da
+  conexão do solicitante) e mostrá-los no rodapé;
+- **Ações**: `x`/`X` pedem confirmação e chamam `quarantine.restore|purge`;
+  reconexão é automática — sem daemon, a tela de espera aparece e o poller
+  continua tentando;
+- **Testes**: estado/teclado em testes puros e render com
+  `ratatui::TestBackend` (todas as abas, overlays, terminal minúsculo e a
+  tela offline), sem exigir TTY.
 
 ## Modelo de segurança
 

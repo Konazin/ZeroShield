@@ -7,6 +7,8 @@ members = [
     "crates/zs-proc",
     "crates/zs-net",
     "crates/zs-watch",
+    "crates/zs-report",
+    "crates/zs-tui",
     "crates/zs-cli",
     "crates/zs-daemon",
     "crates/zs-gui",
@@ -20,6 +22,8 @@ default-members = [
     "crates/zs-proc",
     "crates/zs-net",
     "crates/zs-watch",
+    "crates/zs-report",
+    "crates/zs-tui",
     "crates/zs-cli",
     "crates/zs-daemon",
 ]
@@ -40,6 +44,8 @@ zs-scan = { path = "crates/zs-scan" }
 zs-proc = { path = "crates/zs-proc" }
 zs-net = { path = "crates/zs-net" }
 zs-watch = { path = "crates/zs-watch" }
+zs-report = { path = "crates/zs-report" }
+zs-tui = { path = "crates/zs-tui" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -54,6 +60,7 @@ sha1 = "0.10"
 md-5 = "0.10"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+ratatui = "0.30"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tokio = { version = "1", features = [

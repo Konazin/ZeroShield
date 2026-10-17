@@ -1416,3 +1416,124 @@ pub async fn cmd_findings(ctx: &Ctx, limit: u32) -> ZsResult<()> {
     }
     Ok(())
 }
+
+// ------------------------------------------------------- reports / metrics
+
+pub struct ReportArgs {
+    pub format: String,
+    pub days: u32,
+    pub limit: u32,
+    pub section: Option<String>,
+    pub out: Option<PathBuf>,
+}
+
+pub struct MetricsArgs {
+    pub format: String,
+    pub out: Option<PathBuf>,
+}
+
+fn write_output(out: Option<&Path>, text: &str) -> ZsResult<()> {
+    match out {
+        Some(path) => std::fs::write(path, text)
+            .map_err(|e| ZsError::io(path.to_path_buf(), e))
+            .map(|_| ()),
+        None => {
+            print!("{text}");
+            Ok(())
+        }
+    }
+}
+
+pub async fn cmd_report(ctx: &Ctx, args: ReportArgs) -> ZsResult<()> {
+    if args.format != "csv" && args.section.is_some() {
+        return Err(ZsError::Config(
+            "--section is only used with --format csv".into(),
+        ));
+    }
+    let opts = zs_report::ReportOptions {
+        days: args.days.min(3650),
+        limit: args.limit.clamp(1, 10_000),
+    };
+
+    let data: zs_report::ReportData = if let Some(mut client) = ctx.daemon().await {
+        let resp = client
+            .call_simple(
+                methods::REPORT_GET,
+                json!({ "days": opts.days, "limit": opts.limit }),
+            )
+            .await?;
+        Ctx::from_value(resp.into_result()?)?
+    } else {
+        let local = ctx.local()?;
+        zs_report::collect(&local.storage, zs_core::VERSION, opts)?
+    };
+
+    let rendered = match args.format.as_str() {
+        "json" => zs_report::render_json(&data)?,
+        "csv" => {
+            let section = match args.section.as_deref() {
+                Some(name) => zs_report::CsvSection::parse(name).ok_or_else(|| {
+                    ZsError::Config(format!(
+                        "unknown section '{name}' (use findings, scans, events or quarantine)"
+                    ))
+                })?,
+                None => zs_report::CsvSection::Findings,
+            };
+            zs_report::render_csv(&data, section)
+        }
+        "html" => zs_report::render_html(&data),
+        other => {
+            return Err(ZsError::Config(format!(
+                "unknown format '{other}' (use json, csv or html)"
+            )))
+        }
+    };
+
+    write_output(args.out.as_deref(), &rendered)?;
+    if args.out.is_some() && !ctx.json {
+        let summary = &data.summary;
+        println!(
+            "report written: {} scan(s), {} finding(s) in period, {} threat(s) total, {} quarantine entr(ies)",
+            summary.scans_in_period, summary.findings_in_period, summary.threats_total, summary.quarantine_entries
+        );
+    }
+    Ok(())
+}
+
+pub async fn cmd_metrics(ctx: &Ctx, args: MetricsArgs) -> ZsResult<()> {
+    let set: zs_report::MetricSet = if let Some(mut client) = ctx.daemon().await {
+        let resp = client.call_simple(methods::METRICS_GET, json!({})).await?;
+        Ctx::from_value(resp.into_result()?)?
+    } else {
+        let local = ctx.local()?;
+        let input = zs_report::MetricsInput {
+            up: false,
+            version: zs_core::VERSION.to_string(),
+            uptime_secs: 0,
+            scans_total: local.storage.scan_count()?,
+            threats_total: local.storage.threat_count()?,
+            findings_total: local.storage.finding_count()?,
+            quarantine_entries: local.quarantine.list()?.len() as u64,
+            signatures_total: local.storage.signature_count()?,
+            rules_total: local.scanner.rules().len() as u64,
+            clean_cache_entries: local.storage.clean_cache_len().unwrap_or(0),
+            watch_sessions: 0,
+            watched_dirs: 0,
+            net_rules_total: local.storage.list_net_rules(true)?.len() as u64,
+            procmon_processes: 0,
+            events_by_severity: local.storage.event_counts_by_severity()?,
+        };
+        zs_report::collect_metrics(&input)
+    };
+
+    let rendered = match args.format.as_str() {
+        "prometheus" => zs_report::render_prometheus(&set),
+        "journald" => zs_report::render_journald(&set),
+        other => {
+            return Err(ZsError::Config(format!(
+                "unknown format '{other}' (use prometheus or journald)"
+            )))
+        }
+    };
+    write_output(args.out.as_deref(), &rendered)
+}

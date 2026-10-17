@@ -8,7 +8,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{ZsError, ZsResult};
 use crate::model::{
-    Detection, Finding, Hashes, QuarantineEntry, Severity, SignatureRow, StoredEvent, Verdict,
+    Detection, Finding, FindingRow, Hashes, QuarantineEntry, ScanRow, Severity, SignatureRow,
+    StoredEvent, Verdict,
 };
 use crate::util::now_secs;
 
@@ -169,11 +170,17 @@ impl Storage {
     }
 
     pub fn list_events(&self, limit: u32) -> ZsResult<Vec<StoredEvent>> {
+        self.list_events_since(limit, 0)
+    }
+
+    /// List events with `ts >= since` (0 means "no lower bound"), newest first.
+    pub fn list_events_since(&self, limit: u32, since: i64) -> ZsResult<Vec<StoredEvent>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, ts, kind, severity, payload FROM events ORDER BY id DESC LIMIT ?1",
+            "SELECT id, ts, kind, severity, payload FROM events
+             WHERE ts >= ?1 ORDER BY id DESC LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
+        let rows = stmt.query_map(params![since, limit as i64], |row| {
             let payload: String = row.get(4)?;
             Ok(StoredEvent {
                 id: row.get(0)?,
@@ -182,6 +189,16 @@ impl Storage {
                 severity: Severity::from_str_lenient(&row.get::<_, String>(3)?),
                 payload: serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null),
             })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Event count per severity label (`info`, `low`, ...), for metrics.
+    pub fn event_counts_by_severity(&self) -> ZsResult<Vec<(String, u64)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare("SELECT severity, COUNT(*) FROM events GROUP BY severity")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -224,6 +241,28 @@ impl Storage {
         Ok(n as u64)
     }
 
+    /// List scans with `ts >= since` (0 means "no lower bound"), newest first.
+    pub fn list_scans(&self, limit: u32, since: i64) -> ZsResult<Vec<ScanRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, target, files, bytes, findings, max_score, duration_ms
+             FROM scans WHERE ts >= ?1 ORDER BY ts DESC, rowid DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since, limit as i64], |row| {
+            Ok(ScanRow {
+                id: row.get(0)?,
+                ts: row.get(1)?,
+                target: row.get(2)?,
+                files: row.get::<_, i64>(3)? as u64,
+                bytes: row.get::<_, i64>(4)? as u64,
+                findings: row.get::<_, i64>(5)? as u64,
+                max_score: row.get::<_, i64>(6)? as u32,
+                duration_ms: row.get::<_, i64>(7)? as u64,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     // ------------------------------------------------------------- findings
 
     pub fn record_finding(&self, scan_id: Option<&str>, f: &Finding) -> ZsResult<i64> {
@@ -255,18 +294,48 @@ impl Storage {
         Ok(n as u64)
     }
 
-    pub fn list_findings(&self, limit: u32) -> ZsResult<Vec<Finding>> {
+    /// Number of recorded findings (any verdict).
+    pub fn finding_count(&self) -> ZsResult<u64> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare("SELECT payload FROM findings ORDER BY id DESC LIMIT ?1")?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            let payload: String = row.get(0)?;
-            Ok(payload)
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM findings", [], |r| r.get(0))?;
+        Ok(n as u64)
+    }
+
+    pub fn list_findings(&self, limit: u32) -> ZsResult<Vec<Finding>> {
+        Ok(self
+            .list_findings_rows(limit, 0)?
+            .into_iter()
+            .map(|row| row.finding)
+            .collect())
+    }
+
+    /// List findings with `ts >= since` (0 means "no lower bound"), newest
+    /// first, keeping the storage metadata (id, ts, scan_id).
+    pub fn list_findings_rows(&self, limit: u32, since: i64) -> ZsResult<Vec<FindingRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, scan_id, payload FROM findings
+             WHERE ts >= ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since, limit as i64], |row| {
+            let payload: String = row.get(3)?;
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                payload,
+            ))
         })?;
         let mut out = Vec::new();
         for raw in rows {
-            let raw = raw?;
-            if let Ok(f) = serde_json::from_str::<Finding>(&raw) {
-                out.push(f);
+            let (id, ts, scan_id, raw) = raw?;
+            if let Ok(finding) = serde_json::from_str::<Finding>(&raw) {
+                out.push(FindingRow {
+                    id,
+                    ts,
+                    scan_id,
+                    finding,
+                });
             }
         }
         Ok(out)
@@ -684,6 +753,72 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "info");
         assert_eq!(events[0].payload["hello"], "world");
+    }
+
+    #[test]
+    fn event_listing_respects_since() {
+        let s = store();
+        s.record_event("a", Severity::Info, &serde_json::json!({}))
+            .unwrap();
+        let now = crate::util::now_secs();
+        assert_eq!(s.list_events_since(10, 0).unwrap().len(), 1);
+        assert_eq!(s.list_events_since(10, now - 60).unwrap().len(), 1);
+        assert!(s.list_events_since(10, now + 60).unwrap().is_empty());
+    }
+
+    #[test]
+    fn event_counts_group_by_severity() {
+        let s = store();
+        s.record_event("a", Severity::Info, &serde_json::json!({}))
+            .unwrap();
+        s.record_event("b", Severity::Critical, &serde_json::json!({}))
+            .unwrap();
+        s.record_event("c", Severity::Critical, &serde_json::json!({}))
+            .unwrap();
+        let mut counts = s.event_counts_by_severity().unwrap();
+        counts.sort();
+        assert_eq!(
+            counts,
+            vec![("critical".to_string(), 2), ("info".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn scan_listing_respects_since() {
+        let s = store();
+        s.record_scan("s1", "/home", 3, 100, 1, 80, 12).unwrap();
+        s.record_scan("s2", "/tmp", 1, 10, 0, 0, 3).unwrap();
+        let scans = s.list_scans(10, 0).unwrap();
+        assert_eq!(scans.len(), 2);
+        assert_eq!(s.scan_count().unwrap(), 2);
+        let newest = &scans[0];
+        assert_eq!(newest.id, "s2");
+        assert_eq!(newest.files, 1);
+        assert_eq!(newest.findings, 0);
+        let now = crate::util::now_secs();
+        assert_eq!(s.list_scans(10, now - 60).unwrap().len(), 2);
+        assert!(s.list_scans(10, now + 60).unwrap().is_empty());
+        assert_eq!(s.list_scans(1, 0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn finding_rows_keep_metadata() {
+        let s = store();
+        let f = sample_finding();
+        let id = s.record_finding(Some("scan-1"), &f).unwrap();
+        assert!(id > 0);
+        let rows = s.list_findings_rows(10, 0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].scan_id.as_deref(), Some("scan-1"));
+        assert_eq!(rows[0].finding.path, "/tmp/eicar.com");
+        assert_eq!(rows[0].finding.score, 100);
+        assert!(rows[0].ts > 0);
+        let now = crate::util::now_secs();
+        assert_eq!(s.list_findings_rows(10, now - 60).unwrap().len(), 1);
+        assert!(s.list_findings_rows(10, now + 60).unwrap().is_empty());
+        // The plain listing still returns bare findings.
+        assert_eq!(s.list_findings(10).unwrap().len(), 1);
     }
 
     #[test]

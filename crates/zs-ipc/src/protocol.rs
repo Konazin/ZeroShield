@@ -33,6 +33,10 @@ pub mod methods {
     pub const WATCH_FS_STOP: &str = "watch.fs.stop";
     /// List active watch sessions (`watch.fs.list`).
     pub const WATCH_FS_LIST: &str = "watch.fs.list";
+    /// Collect a report (`report.get`).
+    pub const REPORT_GET: &str = "report.get";
+    /// Collect the metric set (`metrics.get`).
+    pub const METRICS_GET: &str = "metrics.get";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

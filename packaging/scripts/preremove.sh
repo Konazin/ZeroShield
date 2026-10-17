@@ -5,6 +5,7 @@ set -e
 if [ -d /run/systemd/system ]; then
     if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
         systemctl disable --now zeroshield-scan.timer >/dev/null 2>&1 || true
+        systemctl disable --now zeroshield-metrics.timer >/dev/null 2>&1 || true
         systemctl stop zeroshieldd.service >/dev/null 2>&1 || true
     fi
 fi

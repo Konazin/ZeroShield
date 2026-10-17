@@ -1,0 +1,16 @@
+[package]
+name = "zs-tui"
+description = "ZeroShield terminal user interface (ratatui)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zs-core.workspace = true
+zs-ipc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ratatui.workspace = true
+tokio.workspace = true
