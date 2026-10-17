@@ -20,7 +20,7 @@ em modo *audit*.
 > Estado: **v0.1.0 (alpha)** — núcleo, CLI, daemon, scanner, monitor de
 > processos e IPS funcionais; GUI GTK4 escrita (compila em ambiente com
 > GTK4/libadwaita); empacotamento e CI incluídos. Veja o
-> [roadmap](docs/roadmap.md).
+> [roadmap](ROADMAP.md).
 
 ## Arquitetura
 
@@ -316,9 +316,12 @@ Debian (trixie) e Arch, build da GUI com GTK4 e os testes do SDK Python — veja
       removível; validação com USB real pendente)
 - [x] **M8** TUI + relatórios (ratatui, json/csv/html, métricas
       Prometheus/journald; validação de UX em terminal real pendente)
-- [ ] **M9** Hardening, polkit, eBPF e v1.0
+- [ ] **M9** Hardening, polkit, eBPF e v1.0 — M9-A (fuzzing/limites),
+      M9-B (feeds GPG + incremental) e M9-C (polkit + peer-credentials)
+      prontos; faltam M9-D (eBPF), M9-E (v1.0) e a auditoria externa
 
-Detalhes em [`docs/roadmap.md`](docs/roadmap.md).
+Detalhes em [`ROADMAP.md`](ROADMAP.md) — inclui a premissa e o escopo do
+**mega teste** (validação E2E em ambiente real, pendente).
 
 ## Licença
 
