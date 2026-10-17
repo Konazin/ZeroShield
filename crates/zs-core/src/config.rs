@@ -254,6 +254,15 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Parse and validate TOML text without any file I/O (used by tests and
+    /// fuzz targets).
+    pub fn parse_toml(text: &str) -> ZsResult<Self> {
+        let cfg: Config = toml::from_str(text)
+            .map_err(|e| ZsError::Config(format!("failed to parse config: {e}")))?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
     pub fn validate(&self) -> ZsResult<()> {
         if self.scanner.min_report_score > 100 {
             return Err(ZsError::Config(

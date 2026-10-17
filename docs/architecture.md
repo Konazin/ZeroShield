@@ -244,3 +244,25 @@ node_exporter.
 - Unidades systemd endurecidas (`ProtectSystem=strict`, `NoNewPrivileges`,
   `SystemCallFilter=@system-service`), com `ReadWritePaths` restrito a
   `/var/lib/zeroshield` e `/run/zeroshield`.
+
+## Limites de robustez
+
+Entradas não confiáveis nunca podem fazer o daemon alocar memória sem limite
+nem derrubá-lo com um panic. Os limites atuais:
+
+| Limite | Valor | Constante |
+|---|---|---|
+| Frame IPC | 1 MiB (sem o `\n`) | `zs_ipc::protocol::MAX_FRAME_BYTES` |
+| Requests em voo por conexão | 64 | `zs_ipc::protocol::MAX_INFLIGHT_REQUESTS` |
+| Arquivo de feed | 64 MiB | `zs_net::feeds::MAX_FEED_BYTES` (+ `curl --max-filesize`) |
+| Entradas por feed | 1.000.000 | `zs_net::feeds::MAX_FEED_ENTRIES` |
+| Linha de feed | 8 KiB | `zs_net::feeds::MAX_FEED_LINE_BYTES` |
+| Arquivo de regras | 8 MiB | `zs_scan::rules::MAX_RULE_FILE_BYTES` |
+| Arquivo de assinaturas | 64 MiB | `zs_scan::signatures::MAX_SIG_IMPORT_BYTES` |
+| Linha de assinatura | 4 KiB | `zs_scan::signatures::MAX_SIG_LINE_BYTES` |
+
+Um frame acima do limite recebe resposta de erro e a conexão é fechada;
+linhas acima do limite são puladas com `warn`. Os parsers (frame IPC, feeds,
+regras, assinaturas, config e heurísticas ELF) são cobertos por mini-fuzzers
+determinísticos (`crates/*/tests/mini_fuzz.rs`, em todo PR com Rust stable) e
+por alvos `cargo-fuzz` (`fuzz/`, job semanal da CI).

@@ -70,8 +70,32 @@ pub fn lookup(storage: Option<&Arc<Storage>>, hashes: &Hashes) -> ZsResult<Optio
     Ok(builtins::lookup_builtin(hashes))
 }
 
+/// Largest signature import file accepted (bytes).
+pub const MAX_SIG_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Longest single signature line considered (bytes); longer lines are skipped.
+pub const MAX_SIG_LINE_BYTES: usize = 4 * 1024;
+
 /// Parse a signature file and store its entries. Returns the number imported.
 pub fn import_file(storage: &Storage, path: &Path, format: SigFormat) -> ZsResult<u64> {
+    import_file_limited(storage, path, format, MAX_SIG_IMPORT_BYTES)
+}
+
+/// Like [`import_file`], but with an explicit size cap (tests use small caps).
+pub fn import_file_limited(
+    storage: &Storage,
+    path: &Path,
+    format: SigFormat,
+    max_bytes: u64,
+) -> ZsResult<u64> {
+    let meta = std::fs::metadata(path).map_err(|e| ZsError::io(path, e))?;
+    if meta.len() > max_bytes {
+        return Err(ZsError::Scan(format!(
+            "signature file {} is {} bytes (limit {max_bytes})",
+            path.display(),
+            meta.len()
+        )));
+    }
     let text = std::fs::read_to_string(path).map_err(|e| ZsError::io(path, e))?;
     let fmt = match format {
         SigFormat::Auto => match path.extension().and_then(|e| e.to_str()) {
@@ -87,11 +111,29 @@ pub fn import_file(storage: &Storage, path: &Path, format: SigFormat) -> ZsResul
             .and_then(|n| n.to_str())
             .unwrap_or("signatures")
     );
+    import_text(storage, &text, &source, fmt)
+}
 
+/// Import signatures from text (no file I/O; used by [`import_file`] and by
+/// fuzz targets). `SigFormat::Auto` without a path means plain hash lines.
+pub fn import_text(
+    storage: &Storage,
+    text: &str,
+    source: &str,
+    format: SigFormat,
+) -> ZsResult<u64> {
+    let fmt = match format {
+        SigFormat::Auto => SigFormat::PlainHashes,
+        other => other,
+    };
     let mut imported = 0u64;
     for (lineno, raw) in text.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+            continue;
+        }
+        if line.len() > MAX_SIG_LINE_BYTES {
+            tracing::warn!("{source}:{}: skipping oversized line", lineno + 1);
             continue;
         }
         let parsed = match fmt {
@@ -103,22 +145,17 @@ pub fn import_file(storage: &Storage, path: &Path, format: SigFormat) -> ZsResul
             Some((hash, name, severity, description)) => {
                 let Some(algo) = algo_of(&hash) else {
                     tracing::warn!(
-                        "{}:{}: '{}' is not a valid md5/sha1/sha256 hash; skipping",
-                        path.display(),
+                        "{source}:{}: '{}' is not a valid md5/sha1/sha256 hash; skipping",
                         lineno + 1,
                         hash
                     );
                     continue;
                 };
-                storage.insert_signature(&hash, algo, &name, severity, &description, &source)?;
+                storage.insert_signature(&hash, algo, &name, severity, &description, source)?;
                 imported += 1;
             }
             None => {
-                tracing::warn!(
-                    "{}:{}: skipping unparsable signature",
-                    path.display(),
-                    lineno + 1
-                );
+                tracing::warn!("{source}:{}: skipping unparsable signature", lineno + 1);
             }
         }
     }
@@ -240,5 +277,42 @@ mod tests {
         let storage = Storage::open_in_memory().unwrap();
         let n = import_file(&storage, &p, SigFormat::Auto).unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn caps_import_file_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("hashes.txt");
+        std::fs::write(&p, "3395856ce81f2b7382dee72602f798b642f14140 demo\n").unwrap();
+        let storage = Storage::open_in_memory().unwrap();
+        let err = import_file_limited(&storage, &p, SigFormat::Auto, 4).unwrap_err();
+        assert!(err.to_string().contains("limit 4"), "{err}");
+        assert_eq!(storage.signature_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn skips_oversized_lines() {
+        let storage = Storage::open_in_memory().unwrap();
+        let mut text = String::new();
+        // A valid hash buried in an oversized line must be skipped whole.
+        text.push_str(&"3395856ce81f2b7382dee72602f798b642f14140 ".repeat(120));
+        text.push('\n');
+        text.push_str("3395856ce81f2b7382dee72602f798b642f14140 ok\n");
+        let n = import_text(&storage, &text, "fuzz", SigFormat::PlainHashes).unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn import_text_parses_hdb() {
+        let storage = Storage::open_in_memory().unwrap();
+        let n = import_text(
+            &storage,
+            "44d88612fea8a8f36de82e1278abb02f:68:Test.Sig\n",
+            "fuzz",
+            SigFormat::ClamHdb,
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(storage.signature_count().unwrap(), 1);
     }
 }

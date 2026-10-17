@@ -377,16 +377,21 @@ fn is_fresh(path: &Path, ttl_secs: u64) -> bool {
 }
 
 fn download(url: &str, dest: &Path) -> Result<(), String> {
+    let max_filesize = feeds::MAX_FEED_BYTES.to_string();
     let output = Command::new("curl")
         .args([
             "-fsSL",
             "--max-time",
             "60",
+            "--retry",
+            "2",
             "--proto",
             "=https",
             "--tlsv1.2",
-            "-o",
         ])
+        .arg("--max-filesize")
+        .arg(&max_filesize)
+        .arg("-o")
         .arg(dest)
         .arg(url)
         .output()

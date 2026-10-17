@@ -39,6 +39,19 @@ pub mod methods {
     pub const METRICS_GET: &str = "metrics.get";
 }
 
+/// Largest accepted request frame, in bytes (excluding the trailing newline).
+///
+/// A client can never make the daemon buffer more than this for a single
+/// line: longer frames are answered with an error and the connection is
+/// closed. (JSON nesting is separately bounded by `serde_json`.)
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// Maximum number of requests handled concurrently per connection.
+///
+/// Further requests wait for a slot instead of spawning unbounded tasks, so
+/// a single client cannot flood the daemon with work.
+pub const MAX_INFLIGHT_REQUESTS: usize = 64;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub id: u64,

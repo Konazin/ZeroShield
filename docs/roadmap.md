@@ -112,7 +112,9 @@ falta.
 - [ ] polkit + dbus para CLI/GUI sem privilégio
 - [ ] Backend eBPF real (processos em tempo real, sem polling)
 - [ ] Assinatura de feeds (GPG) e atualização incremental
-- [ ] Fuzzing do parser de regras e do protocolo IPC
+- [x] Fuzzing do parser de regras e do protocolo IPC (mini-fuzzers
+      determinísticos em todo PR + alvos cargo-fuzz no job semanal; limites
+      de frame/feed/regras/assinaturas)
 - [ ] Auditoria de segurança externa
 - [ ] v1.0
 

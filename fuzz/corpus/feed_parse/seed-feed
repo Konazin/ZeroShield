@@ -1,0 +1,5 @@
+1.2.3.4
+5.6.7.0/24
+evil.example.com
+https://bad.domain/path/payload.exe
+102.33.55.1 # inline comment

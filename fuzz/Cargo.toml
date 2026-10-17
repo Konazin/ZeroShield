@@ -1,0 +1,72 @@
+[package]
+name = "zeroshield-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.zs-core]
+path = "../crates/zs-core"
+
+[dependencies.zs-ipc]
+path = "../crates/zs-ipc"
+
+[dependencies.zs-net]
+path = "../crates/zs-net"
+
+[dependencies.zs-scan]
+path = "../crates/zs-scan"
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "ipc_frame"
+path = "fuzz_targets/ipc_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "feed_parse"
+path = "fuzz_targets/feed_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rules_toml"
+path = "fuzz_targets/rules_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sigs_import"
+path = "fuzz_targets/sigs_import.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "elf_heuristics"
+path = "fuzz_targets/elf_heuristics.rs"
+test = false
+doc = false
+bench = false

@@ -29,21 +29,65 @@ impl FeedEntry {
     }
 }
 
+/// Largest feed file accepted from disk (bytes). Downloads are bounded by the
+/// same limit (`curl --max-filesize`).
+pub const MAX_FEED_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Largest number of entries extracted from one feed; beyond this the parse
+/// stops (with a warning) instead of growing without bound.
+pub const MAX_FEED_ENTRIES: usize = 1_000_000;
+
+/// Longest single feed line considered (bytes); longer lines are skipped.
+pub const MAX_FEED_LINE_BYTES: usize = 8 * 1024;
+
 pub fn load_feed_file(path: &Path, source: &str) -> ZsResult<Vec<FeedEntry>> {
+    load_feed_file_limited(path, source, MAX_FEED_BYTES)
+}
+
+/// Like [`load_feed_file`], but with an explicit size cap (tests use small
+/// caps to avoid writing huge files).
+pub fn load_feed_file_limited(
+    path: &Path,
+    source: &str,
+    max_bytes: u64,
+) -> ZsResult<Vec<FeedEntry>> {
+    let meta = std::fs::metadata(path).map_err(|e| ZsError::io(path, e))?;
+    if meta.len() > max_bytes {
+        return Err(ZsError::Net(format!(
+            "feed {} is {} bytes (limit {max_bytes})",
+            path.display(),
+            meta.len()
+        )));
+    }
     let text = std::fs::read_to_string(path).map_err(|e| ZsError::io(path, e))?;
     Ok(parse_feed(&text, source))
 }
 
 /// Parse any feed text into unique entries.
 pub fn parse_feed(text: &str, source: &str) -> Vec<FeedEntry> {
+    parse_feed_capped(text, source, MAX_FEED_ENTRIES)
+}
+
+/// Like [`parse_feed`], but with an explicit entry cap (tests use small caps).
+pub fn parse_feed_capped(text: &str, source: &str, max_entries: usize) -> Vec<FeedEntry> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for line in text.lines() {
+    let mut long_lines = 0u64;
+    let mut capped = false;
+    'lines: for line in text.lines() {
+        if line.len() > MAX_FEED_LINE_BYTES {
+            long_lines += 1;
+            continue;
+        }
         let line = strip_comment(line);
         if line.trim().is_empty() {
             continue;
         }
         for token in tokenize(line) {
+            if out.len() >= max_entries {
+                capped = true;
+                break 'lines;
+            }
             if let Some(entry) = classify(&token, source) {
                 let key = format!("{}:{}", entry.kind, entry.value);
                 if seen.insert(key) {
@@ -51,6 +95,15 @@ pub fn parse_feed(text: &str, source: &str) -> Vec<FeedEntry> {
                 }
             }
         }
+    }
+    if capped {
+        tracing::warn!("feed {source}: entry limit ({max_entries}) reached, truncating");
+    }
+    if long_lines > 0 {
+        tracing::warn!(
+            "feed {source}: skipped {long_lines} line(s) longer than \
+             {MAX_FEED_LINE_BYTES} bytes"
+        );
     }
     out
 }
@@ -198,5 +251,37 @@ not_a_target
         assert!(parse_ipv4("999.1.1.1").is_none());
         assert!(parse_ipv4("1.1.1").is_none());
         assert_eq!(parse_ipv4("10.0.0.1").unwrap(), "10.0.0.1");
+    }
+
+    #[test]
+    fn caps_entries() {
+        let text = "1.1.1.1\n2.2.2.2\n3.3.3.3\n4.4.4.4\n";
+        let entries = parse_feed_capped(text, "t", 2);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].value, "1.1.1.1");
+        assert_eq!(entries[1].value, "2.2.2.2");
+    }
+
+    #[test]
+    fn skips_giant_lines() {
+        let mut text = String::from("1.2.3.4 ");
+        text.push_str(&"a".repeat(MAX_FEED_LINE_BYTES));
+        text.push('\n');
+        text.push_str("5.6.7.8\n");
+        let entries = parse_feed(&text, "t");
+        assert!(!entries.iter().any(|e| e.value == "1.2.3.4"));
+        assert!(entries.iter().any(|e| e.value == "5.6.7.8"));
+    }
+
+    #[test]
+    fn rejects_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("feed.txt");
+        std::fs::write(&p, "1.2.3.4\n").unwrap();
+        let err = load_feed_file_limited(&p, "t", 4).unwrap_err();
+        assert!(err.to_string().contains("limit 4"), "{err}");
+        // Under the cap it loads normally.
+        let entries = load_feed_file_limited(&p, "t", 1024).unwrap();
+        assert_eq!(entries.len(), 1);
     }
 }

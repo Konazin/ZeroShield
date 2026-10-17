@@ -1,0 +1,7 @@
+/target
+/artifacts
+/coverage
+
+# Fuzzer-generated corpus entries; committed seeds (seed-*) are kept.
+/corpus/*/*
+!/corpus/*/seed*

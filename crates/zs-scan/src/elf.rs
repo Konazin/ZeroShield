@@ -132,7 +132,9 @@ pub fn analyze(buf: &[u8], path: &Path) -> Vec<Detection> {
             continue;
         }
         let start = sh.sh_offset as usize;
-        let end = (start + sh.sh_size as usize).min(buf.len());
+        // Hostile ELF headers can carry offsets/sizes that overflow on
+        // addition; saturate so a crafted file can never panic the scanner.
+        let end = start.saturating_add(sh.sh_size as usize).min(buf.len());
         if end <= start {
             continue;
         }
@@ -315,5 +317,30 @@ mod tests {
         buf[0x6a] = 0x01;
         let dets = analyze(&buf, p());
         assert!(dets.iter().any(|d| d.name == "elf/rwx_segment"), "{dets:?}");
+    }
+
+    #[test]
+    fn section_headers_with_wild_offsets_do_not_panic() {
+        // Sections whose offset+size overflow `usize` must be skipped, not
+        // crash the scanner (debug builds panic on overflow).
+        let mut buf = vec![0u8; 0x200];
+        buf[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        buf[4] = 2; // 64-bit
+        buf[5] = 1; // little endian
+        buf[6] = 1; // version
+        buf[16] = 2; // e_type = ET_EXEC
+        buf[18] = 0x3e; // x86-64
+        buf[20] = 1; // e_version
+        buf[24] = 0x40; // e_entry
+        buf[41] = 0x01; // e_shoff = 0x100
+        buf[52] = 0x40; // e_ehsize = 64
+        buf[58] = 0x40; // e_shentsize = 64
+        buf[60] = 2; // e_shnum = 2 (null + one PROGBITS)
+                     // Section header at 0x100 with a hostile offset.
+        buf[0x104] = 1; // sh_type = SHT_PROGBITS
+        buf[0x118..0x120].fill(0xff); // sh_offset = u64::MAX
+        buf[0x122] = 0x01; // sh_size = 0x10000 (>= 64 KiB)
+        let dets = analyze(&buf, p());
+        assert!(!dets.iter().any(|d| d.name == "elf/high_entropy_section"));
     }
 }

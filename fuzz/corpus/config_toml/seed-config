@@ -1,0 +1,3 @@
+[scanner]
+max_file_size = 104857600
+min_report_score = 30

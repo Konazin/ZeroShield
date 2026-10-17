@@ -262,6 +262,18 @@ cargo test
 python3 -m unittest discover -s python/tests
 ```
 
+Rodadas de fuzzing cobrem os parsers de entrada não confiável (frame IPC,
+feeds, regras, assinaturas, config e heurísticas ELF); exigem toolchain
+nightly e `cargo-fuzz`:
+
+```sh
+cargo install cargo-fuzz
+cd fuzz && cargo fuzz run ipc_frame -- -max_total_time=60
+```
+
+Alvos e corpus em [`fuzz/`](fuzz/README.md). Em todo PR, os mesmos parsers
+passam por mini-fuzzers determinísticos em `crates/*/tests/mini_fuzz.rs`.
+
 O workspace separa o núcleo em crates (`zs-core`, `zs-ipc`, `zs-scan`,
 `zs-watch`, `zs-proc`, `zs-net`, `zs-report`, `zs-cli`, `zs-tui`, `zs-daemon`,
 `zs-gui`), com testes unitários em cada um. A CI roda fmt, clippy, testes no

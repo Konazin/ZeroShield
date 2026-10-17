@@ -5,14 +5,16 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 
 use zs_core::error::{ZsError, ZsResult};
 use zs_core::event::Event;
 
-use crate::protocol::{EventEnvelope, Frame, Request, Response};
+use crate::protocol::{
+    EventEnvelope, Frame, Request, Response, MAX_FRAME_BYTES, MAX_INFLIGHT_REQUESTS,
+};
 
 /// Sender for frames on a single connection (used to stream events while a
 /// request is being handled).
@@ -130,6 +132,27 @@ async fn serve_connection(
     handler: Handler,
     events: broadcast::Sender<Event>,
 ) -> ZsResult<()> {
+    serve_connection_with_limits(
+        stream,
+        handler,
+        events,
+        MAX_FRAME_BYTES,
+        MAX_INFLIGHT_REQUESTS,
+    )
+    .await
+}
+
+/// Connection loop with explicit limits.
+///
+/// Split from [`serve_connection`] so tests can exercise the frame-size and
+/// in-flight caps with tiny values instead of megabyte buffers.
+async fn serve_connection_with_limits(
+    stream: UnixStream,
+    handler: Handler,
+    events: broadcast::Sender<Event>,
+    max_frame_bytes: usize,
+    max_inflight: usize,
+) -> ZsResult<()> {
     let (rd, mut wr) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
 
@@ -164,17 +187,41 @@ async fn serve_connection(
     });
 
     // Reader loop: one task per request so slow scans do not block the socket.
+    // Two caps protect the daemon from a hostile or buggy client:
+    //   * `max_frame_bytes` bounds how much memory a single frame can use;
+    //   * `max_inflight` bounds how many request tasks one connection spawns.
     let mut reader = BufReader::new(rd);
     let mut line_buf = String::new();
+    let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight.max(1)));
+    let read_limit = max_frame_bytes.saturating_add(1) as u64;
     loop {
         line_buf.clear();
-        match reader.read_line(&mut line_buf).await {
+        // `take` caps the bytes buffered for a single line: an endless line
+        // can never grow `line_buf` beyond `read_limit` bytes.
+        match (&mut reader)
+            .take(read_limit)
+            .read_line(&mut line_buf)
+            .await
+        {
             Ok(0) => break, // client disconnected
             Ok(_) => {}
             Err(e) => {
                 tracing::debug!("read error: {e}");
                 break;
             }
+        }
+        if !line_buf.ends_with('\n') {
+            if line_buf.len() as u64 >= read_limit {
+                let _ = tx.send(Frame::Response(Response::err(
+                    0,
+                    format!("frame exceeds the {max_frame_bytes} byte limit"),
+                )));
+                tracing::debug!("closing connection: oversized frame");
+            } else if !line_buf.is_empty() {
+                // EOF in the middle of a frame: nothing sensible to answer.
+                tracing::debug!("closing connection: partial frame at end of stream");
+            }
+            break;
         }
         let raw = line_buf.trim();
         if raw.is_empty() {
@@ -190,6 +237,12 @@ async fn serve_connection(
                 continue;
             }
         };
+        // Backpressure: wait for a free slot before spawning the task so a
+        // single connection cannot queue unbounded work.
+        let permit = match inflight.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => break,
+        };
         let handler = handler.clone();
         let tx_req = tx.clone();
         tokio::spawn(async move {
@@ -199,6 +252,7 @@ async fn serve_connection(
                 response.id = id;
             }
             let _ = tx_req.send(Frame::Response(response));
+            drop(permit);
         });
     }
 
@@ -348,5 +402,112 @@ mod tests {
 
         let _ = stop_tx.send(());
         server_task.abort();
+    }
+
+    fn slow_handler() -> Handler {
+        Arc::new(|req: Request, _tx: FrameTx| {
+            Box::pin(async move {
+                if req.method == "slow" {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Response::ok(req.id, serde_json::json!({"echo": req.params}))
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_is_rejected_and_closed() {
+        let (server_side, mut client) = UnixStream::pair().unwrap();
+        let events = broadcast::channel(8).0;
+        let task = tokio::spawn(serve_connection_with_limits(
+            server_side,
+            echo_handler(),
+            events,
+            512,
+            4,
+        ));
+
+        // One frame without a newline, well above the 512 byte cap.
+        client.write_all("x".repeat(600).as_bytes()).await.unwrap();
+
+        let mut reader = BufReader::new(&mut client);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        match Frame::parse(&line).unwrap() {
+            Frame::Response(resp) => {
+                assert!(!resp.ok);
+                assert!(resp.error.unwrap().contains("512"));
+            }
+            other => panic!("expected response frame, got {other:?}"),
+        }
+
+        // The connection is closed right after the error frame.
+        line.clear();
+        assert_eq!(reader.read_line(&mut line).await.unwrap(), 0);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn partial_frame_at_eof_closes_silently() {
+        let (server_side, mut client) = UnixStream::pair().unwrap();
+        let events = broadcast::channel(8).0;
+        let task = tokio::spawn(serve_connection_with_limits(
+            server_side,
+            echo_handler(),
+            events,
+            512,
+            4,
+        ));
+
+        client.write_all(b"{\"id\":1,").await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let mut reader = BufReader::new(&mut client);
+        let mut line = String::new();
+        assert_eq!(reader.read_line(&mut line).await.unwrap(), 0);
+        assert!(line.is_empty());
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn inflight_limit_backpressures_without_deadlock() {
+        let (server_side, mut client) = UnixStream::pair().unwrap();
+        let events = broadcast::channel(8).0;
+        let task = tokio::spawn(serve_connection_with_limits(
+            server_side,
+            slow_handler(),
+            events,
+            4096,
+            2,
+        ));
+
+        // Six slow requests pipelined through a limit of two in flight: the
+        // reader must block on the semaphore, then drain everything.
+        let request = "{\"id\":7,\"method\":\"slow\",\"params\":{}}\n";
+        for _ in 0..6 {
+            client.write_all(request.as_bytes()).await.unwrap();
+        }
+
+        let mut reader = BufReader::new(&mut client);
+        let responses = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut responses = 0;
+            let mut line = String::new();
+            while responses < 6 {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                assert!(matches!(Frame::parse(&line).unwrap(), Frame::Response(_)));
+                responses += 1;
+            }
+            responses
+        })
+        .await
+        .expect("server deadlocked under backpressure");
+        assert_eq!(responses, 6);
+
+        drop(reader);
+        drop(client);
+        task.await.unwrap().unwrap();
     }
 }

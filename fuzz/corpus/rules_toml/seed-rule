@@ -1,0 +1,7 @@
+[[rule]]
+name = "test/text"
+description = "text rule"
+severity = "high"
+score = 70
+pattern = "/dev/tcp/"
+pattern_kind = "text"

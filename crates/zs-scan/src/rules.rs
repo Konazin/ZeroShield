@@ -29,6 +29,10 @@ use zs_core::model::{Detection, Severity};
 
 use crate::builtins;
 
+/// Largest single rules file accepted (bytes), whether from disk or embedded
+/// via the API. Bounds parse time and memory for hostile rule packs.
+pub const MAX_RULE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PatternKind {
@@ -290,6 +294,12 @@ impl RuleSet {
     }
 
     pub fn load_toml(&mut self, text: &str, source: &str) -> ZsResult<usize> {
+        if text.len() as u64 > MAX_RULE_FILE_BYTES {
+            return Err(ZsError::Scan(format!(
+                "rules from {source} are {} bytes (limit {MAX_RULE_FILE_BYTES})",
+                text.len()
+            )));
+        }
         let raw: RawRuleFile = toml::from_str(text)
             .map_err(|e| ZsError::Scan(format!("failed to parse rules from {source}: {e}")))?;
         let mut added = 0;
@@ -301,6 +311,14 @@ impl RuleSet {
     }
 
     pub fn load_file(&mut self, path: &Path) -> ZsResult<usize> {
+        let meta = std::fs::metadata(path).map_err(|e| ZsError::io(path, e))?;
+        if meta.len() > MAX_RULE_FILE_BYTES {
+            return Err(ZsError::Scan(format!(
+                "rules file {} is {} bytes (limit {MAX_RULE_FILE_BYTES})",
+                path.display(),
+                meta.len()
+            )));
+        }
         let text = std::fs::read_to_string(path).map_err(|e| ZsError::io(path, e))?;
         self.load_toml(&text, &path.display().to_string())
     }
