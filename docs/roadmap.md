@@ -111,7 +111,9 @@ falta.
 
 - [ ] polkit + dbus para CLI/GUI sem privilégio
 - [ ] Backend eBPF real (processos em tempo real, sem polling)
-- [ ] Assinatura de feeds (GPG) e atualização incremental
+- [x] Assinatura de feeds (GPG) e atualização incremental (`gpgv` +
+      keyring próprio, `ETag`/`If-Modified-Since` com `304`, fail-closed:
+      assinatura inválida mantém as regras anteriores)
 - [x] Fuzzing do parser de regras e do protocolo IPC (mini-fuzzers
       determinísticos em todo PR + alvos cargo-fuzz no job semanal; limites
       de frame/feed/regras/assinaturas)

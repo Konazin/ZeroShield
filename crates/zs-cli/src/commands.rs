@@ -1076,7 +1076,15 @@ pub async fn cmd_net_status(ctx: &Ctx) -> ZsResult<()> {
         "  rules       {} blocked ({} allowlist / {} blocklist entries in config)",
         status.rule_count, status.allowlist, status.blocklist
     );
-    println!("  feeds       {} configured", status.feeds);
+    println!(
+        "  feeds       {} configured (signatures {})",
+        status.feeds,
+        if status.feed_signatures {
+            "required"
+        } else {
+            "off"
+        }
+    );
     println!("  dns mode    {}", status.dns_mode);
     Ok(())
 }
@@ -1140,19 +1148,33 @@ pub async fn cmd_net_feeds_update(ctx: &Ctx, force: bool) -> ZsResult<()> {
     let rows: Vec<Vec<String>> = results
         .iter()
         .map(|r| {
+            let state = if r.error.is_some() {
+                "error"
+            } else if r.not_modified {
+                "not modified"
+            } else if r.skipped {
+                "cached"
+            } else {
+                "downloaded"
+            };
             vec![
                 truncate(&r.url, 62),
                 r.entries.to_string(),
-                if r.skipped {
-                    "cached".into()
+                state.into(),
+                if r.verified {
+                    "verified".into()
                 } else {
-                    "downloaded".into()
+                    "-".into()
                 },
                 truncate(r.error.as_deref().unwrap_or(""), 40),
             ]
         })
         .collect();
-    print_table(&ctx.style, &["FEED", "ENTRIES", "STATE", "ERROR"], &rows);
+    print_table(
+        &ctx.style,
+        &["FEED", "ENTRIES", "STATE", "GPG", "ERROR"],
+        &rows,
+    );
     let total: u64 = results.iter().map(|r| r.entries).sum();
     println!("\n{total} indicators ingested");
     Ok(())

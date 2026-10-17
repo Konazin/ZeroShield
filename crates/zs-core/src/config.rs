@@ -196,6 +196,13 @@ pub struct NetGuardConfig {
     pub feed_urls: Vec<String>,
     /// Feed cache lifetime (seconds).
     pub feed_cache_ttl_secs: u64,
+    /// Require a detached GPG signature (`<feed_url>.asc`) for every feed
+    /// before it may replace the cache. Recommended; disabled by default
+    /// for easy migration.
+    pub feed_signature_required: bool,
+    /// Public keyring (binary, as exported by `gpg --export`) used by
+    /// `gpgv` to verify feed signatures.
+    pub feed_keyring: PathBuf,
     pub dns_mode: DnsMode,
     pub dnsmasq_dir: PathBuf,
     pub unbound_dir: PathBuf,
@@ -218,6 +225,8 @@ impl Default for NetGuardConfig {
                 "https://urlhaus.abuse.ch/downloads/text/".into(),
             ],
             feed_cache_ttl_secs: 6 * 3600,
+            feed_signature_required: false,
+            feed_keyring: PathBuf::from("/etc/zeroshield/feeds.gpg"),
             dns_mode: DnsMode::Off,
             dnsmasq_dir: PathBuf::from("/etc/dnsmasq.d"),
             unbound_dir: PathBuf::from("/etc/unbound/unbound.conf.d"),
@@ -328,6 +337,13 @@ mod tests {
     }
 
     #[test]
+    fn feed_signatures_default_to_off() {
+        let cfg = NetGuardConfig::default();
+        assert!(!cfg.feed_signature_required, "opt-in, migration-friendly");
+        assert_eq!(cfg.feed_keyring, PathBuf::from("/etc/zeroshield/feeds.gpg"));
+    }
+
+    #[test]
     fn parses_partial_toml() {
         let text = r#"
 [scanner]
@@ -337,6 +353,8 @@ recursive = false
 [netguard]
 mode = "block"
 dns_mode = "dnsmasq"
+feed_signature_required = true
+feed_keyring = "/tmp/feeds.gpg"
 
 [watch]
 enabled = true
@@ -354,6 +372,8 @@ roots = ["/media"]
         assert!(!cfg.scanner.recursive);
         assert_eq!(cfg.netguard.mode, NetMode::Block);
         assert_eq!(cfg.netguard.dns_mode, DnsMode::Dnsmasq);
+        assert!(cfg.netguard.feed_signature_required);
+        assert_eq!(cfg.netguard.feed_keyring, PathBuf::from("/tmp/feeds.gpg"));
         assert!(cfg.watch.enabled);
         assert_eq!(cfg.watch.paths.len(), 2);
         assert!(cfg.watch.quarantine);

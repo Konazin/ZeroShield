@@ -205,6 +205,8 @@ alert_score = 40          # score mínimo para alertar
 enabled = false           # IPS desligado por padrão
 mode = "audit"            # "audit" ou "block"
 dns_mode = "off"          # "dnsmasq" ou "unbound"
+feed_signature_required = false  # true = só ingere feed com assinatura GPG válida
+feed_keyring = "/etc/zeroshield/feeds.gpg"
 blocklist = ["198.51.100.0/24", "malware.example"]
 allowlist = ["trusted.example"]
 ```
@@ -231,6 +233,12 @@ Variáveis de ambiente úteis: `ZS_CONFIG`, `ZS_DATA_DIR`, `ZS_SOCKET`,
   registrados no banco.
 - ClamAV/YARA são vistos apenas como **serviços externos** opcionais — nunca
   linkados ao binário.
+- Feeds de ameaças podem ser verificados por assinatura GPG detached
+  (`<url>.asc`) com `gpgv` e keyring próprio
+  (`netguard.feed_signature_required = true`): assinatura inválida ou ausente
+  descarta o download e mantém o cache (regras) anterior — fail-closed.
+  Atualizações são incrementais (`ETag`/`If-Modified-Since`; `304` pula o
+  parsing).
 - Nenhum script é executado no reboot; o IPS gera o ruleset em arquivo e a
   aplicação é explícita.
 

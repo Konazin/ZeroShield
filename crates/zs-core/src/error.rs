@@ -18,6 +18,9 @@ pub enum ZsError {
     #[error("network error: {0}")]
     Net(String),
 
+    #[error("security error: {0}")]
+    Security(String),
+
     #[error("ipc error: {0}")]
     Ipc(String),
 

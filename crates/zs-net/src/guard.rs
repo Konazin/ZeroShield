@@ -16,6 +16,7 @@ use crate::blocklist::{Blocklist, Decision};
 use crate::dns::{self, DnsBackend};
 use crate::feeds;
 use crate::nft;
+use crate::signature;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetStatus {
@@ -26,6 +27,9 @@ pub struct NetStatus {
     pub is_root: bool,
     pub rule_count: u64,
     pub feeds: usize,
+    /// Whether `netguard.feed_signature_required` is enabled.
+    #[serde(default)]
+    pub feed_signatures: bool,
     pub dns_mode: String,
     pub allowlist: usize,
     pub blocklist: usize,
@@ -45,6 +49,12 @@ pub struct FeedUpdateResult {
     pub source: String,
     pub entries: u64,
     pub skipped: bool,
+    /// The server answered `304 Not Modified`: the cached feed was reused.
+    #[serde(default)]
+    pub not_modified: bool,
+    /// A GPG signature was verified for the feed content now in use.
+    #[serde(default)]
+    pub verified: bool,
     pub error: Option<String>,
 }
 
@@ -101,6 +111,7 @@ impl NetGuard {
             is_root: is_root(),
             rule_count: self.storage.net_rule_count()?,
             feeds: self.cfg.feed_urls.len(),
+            feed_signatures: self.cfg.feed_signature_required,
             dns_mode: match self.cfg.dns_mode {
                 DnsMode::Off => "off".into(),
                 DnsMode::Dnsmasq => "dnsmasq".into(),
@@ -161,55 +172,157 @@ impl NetGuard {
     }
 
     /// Download and ingest every configured feed (respecting the cache TTL).
+    ///
+    /// Feeds are fetched incrementally: when a cached copy exists, the
+    /// request is conditional (`If-Modified-Since` + `ETag`) and a
+    /// `304 Not Modified` answer keeps the cache and skips parsing.
+    ///
+    /// When `netguard.feed_signature_required` is enabled, every *new* feed
+    /// body must come with a valid detached signature (`<url>.asc`) checked
+    /// by `gpgv` against `netguard.feed_keyring`. Otherwise the download is
+    /// discarded and the previously cached content (and its rules) is kept
+    /// — fail-closed.
     pub fn update_feeds(&self, force: bool) -> Vec<FeedUpdateResult> {
         std::fs::create_dir_all(&self.cache_dir).ok();
-        let mut results = Vec::new();
-        for url in &self.cfg.feed_urls {
-            let name = feed_name(url);
-            let dest = self.cache_dir.join(format!("{name}.txt"));
-            let mut result = FeedUpdateResult {
-                url: url.clone(),
-                source: format!("feed:{name}"),
-                entries: 0,
-                skipped: false,
-                error: None,
-            };
-
-            let fresh = !force && is_fresh(&dest, self.cfg.feed_cache_ttl_secs);
-            if fresh {
-                result.skipped = true;
-            } else if let Err(e) = download(url, &dest) {
-                result.error = Some(e);
-                results.push(result);
-                continue;
-            }
-
-            if !dest.exists() {
-                result.error = Some("feed file missing and could not be downloaded".into());
-                results.push(result);
-                continue;
-            }
-
-            match feeds::load_feed_file(&dest, &result.source) {
-                Ok(entries) => {
-                    // Replace the previous content of this feed.
-                    let _ = self.storage.clear_net_rules(Some(&result.source));
-                    for entry in &entries {
-                        if let Err(e) =
-                            self.storage
-                                .upsert_net_rule(&entry.kind, &entry.value, &result.source)
-                        {
-                            tracing::warn!("failed to store rule {}: {e}", entry.value);
-                        }
-                    }
-                    result.entries = entries.len() as u64;
-                }
-                Err(e) => result.error = Some(e.to_string()),
-            }
-            results.push(result);
+        if !self.cfg.feed_signature_required && !self.cfg.feed_urls.is_empty() {
+            tracing::warn!(
+                "feed signature verification is disabled \
+                 (set netguard.feed_signature_required = true and netguard.feed_keyring)"
+            );
         }
+        let results: Vec<FeedUpdateResult> = self
+            .cfg
+            .feed_urls
+            .iter()
+            .map(|url| self.update_feed(url, force))
+            .collect();
         tracing::info!("feed update finished ({} feeds)", results.len());
         results
+    }
+
+    fn update_feed(&self, url: &str, force: bool) -> FeedUpdateResult {
+        let name = feed_name(url);
+        let dest = self.cache_dir.join(format!("{name}.txt"));
+        let sig_path = self
+            .cache_dir
+            .join(format!("{name}.txt{}", signature::SUFFIX));
+        let tmp = self.cache_dir.join(format!("{name}.txt.tmp"));
+        let sig_tmp = self
+            .cache_dir
+            .join(format!("{name}.txt.tmp{}", signature::SUFFIX));
+        let etag = self.cache_dir.join(format!("{name}.etag"));
+        let etag_tmp = self.cache_dir.join(format!("{name}.etag.tmp"));
+        let signed = self.cfg.feed_signature_required;
+        // Leftover temp files are removed on every exit path; renamed-away
+        // paths no longer exist and removals are harmless no-ops.
+        let _cleanup = TempFiles::new(vec![tmp.clone(), sig_tmp.clone(), etag_tmp.clone()]);
+
+        let mut result = FeedUpdateResult {
+            url: url.to_string(),
+            source: format!("feed:{name}"),
+            entries: 0,
+            skipped: false,
+            not_modified: false,
+            verified: false,
+            error: None,
+        };
+
+        // A fresh cache only counts as trustworthy when its signature (if
+        // required) is present: a cache predating signature verification is
+        // re-fetched below.
+        let fresh = !force && is_fresh(&dest, self.cfg.feed_cache_ttl_secs);
+        if fresh && (!signed || sig_path.is_file()) {
+            result.skipped = true;
+            result.verified = signed;
+            return result;
+        }
+
+        // Conditional requests are only meaningful with a cached copy we
+        // trust.
+        let conditional = !force && dest.is_file() && (!signed || sig_path.is_file());
+        let fetched = if conditional {
+            fetch_conditional(url, &tmp, &dest, &etag, &etag_tmp)
+        } else {
+            download(url, &tmp, feeds::MAX_FEED_BYTES).map(|()| FetchOutcome::Downloaded)
+        };
+        let fetched = match fetched {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                result.error = Some(e);
+                return result;
+            }
+        };
+
+        if matches!(fetched, FetchOutcome::NotModified) {
+            result.skipped = true;
+            result.not_modified = true;
+            // A conditional request implies a trusted cache when signed.
+            result.verified = signed;
+            return result;
+        }
+
+        // New body: the detached signature must verify before anything in
+        // the cache changes.
+        if signed {
+            let sig_url = format!("{url}{}", signature::SUFFIX);
+            if let Err(e) = download(&sig_url, &sig_tmp, signature::MAX_SIGNATURE_BYTES) {
+                result.error = Some(format!("signature download failed: {e}"));
+                return result;
+            }
+        }
+        match self.commit_feed(&tmp, &sig_tmp, &dest, &sig_path) {
+            Ok(verified) => result.verified = verified,
+            Err(e) => {
+                tracing::warn!("feed {url} rejected: {e}");
+                result.error = Some(e);
+                return result;
+            }
+        }
+        if conditional {
+            let _ = std::fs::rename(&etag_tmp, &etag);
+        }
+
+        match feeds::load_feed_file(&dest, &result.source) {
+            Ok(entries) => {
+                // Replace the previous content of this feed.
+                let _ = self.storage.clear_net_rules(Some(&result.source));
+                for entry in &entries {
+                    if let Err(e) =
+                        self.storage
+                            .upsert_net_rule(&entry.kind, &entry.value, &result.source)
+                    {
+                        tracing::warn!("failed to store rule {}: {e}", entry.value);
+                    }
+                }
+                result.entries = entries.len() as u64;
+            }
+            Err(e) => result.error = Some(e.to_string()),
+        }
+        result
+    }
+
+    /// Verify (when required) and move a downloaded feed — and its
+    /// signature — into the cache. On any failure the previous cache entry
+    /// is left untouched (fail-closed). Returns whether a GPG signature was
+    /// verified.
+    fn commit_feed(
+        &self,
+        tmp: &Path,
+        sig_tmp: &Path,
+        dest: &Path,
+        sig_path: &Path,
+    ) -> Result<bool, String> {
+        let signed = self.cfg.feed_signature_required;
+        if signed {
+            signature::verify_detached(&self.cfg.feed_keyring, sig_tmp, tmp)
+                .map_err(|e| e.to_string())?;
+        }
+        std::fs::rename(tmp, dest).map_err(|e| format!("failed to store feed: {e}"))?;
+        if signed {
+            std::fs::rename(sig_tmp, sig_path)
+                .map_err(|e| format!("failed to store feed signature: {e}"))?;
+        }
+        Ok(signed)
     }
 
     /// Generate (and optionally install) nftables rules. Never applies
@@ -376,19 +489,56 @@ fn is_fresh(path: &Path, ttl_secs: u64) -> bool {
     age < Duration::from_secs(ttl_secs)
 }
 
-fn download(url: &str, dest: &Path) -> Result<(), String> {
-    let max_filesize = feeds::MAX_FEED_BYTES.to_string();
-    let output = Command::new("curl")
-        .args([
-            "-fsSL",
-            "--max-time",
-            "60",
-            "--retry",
-            "2",
-            "--proto",
-            "=https",
-            "--tlsv1.2",
-        ])
+/// Outcome of a (possibly conditional) feed transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchOutcome {
+    Downloaded,
+    NotModified,
+}
+
+/// Removes its paths on drop unless the process renamed them away first
+/// (renamed-away paths make the removal a silent no-op).
+struct TempFiles {
+    paths: Vec<PathBuf>,
+}
+
+impl TempFiles {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        for path in &paths {
+            let _ = std::fs::remove_file(path);
+        }
+        Self { paths }
+    }
+}
+
+impl Drop for TempFiles {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Shared `curl` invocation: HTTPS only, system trust store, bounded time
+/// and retries.
+fn curl_base() -> Command {
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        "-fsSL",
+        "--max-time",
+        "60",
+        "--retry",
+        "2",
+        "--proto",
+        "=https",
+        "--tlsv1.2",
+    ]);
+    cmd
+}
+
+fn download(url: &str, dest: &Path, max_bytes: u64) -> Result<(), String> {
+    let max_filesize = max_bytes.to_string();
+    let output = curl_base()
         .arg("--max-filesize")
         .arg(&max_filesize)
         .arg("-o")
@@ -405,6 +555,51 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Conditional GET of an existing cache entry: `-z` sends
+/// `If-Modified-Since` (file mtime) and the stored ETag is sent as
+/// `If-None-Match`. On a `304` nothing is written to `tmp` besides an empty
+/// placeholder (removed by the caller).
+fn fetch_conditional(
+    url: &str,
+    tmp: &Path,
+    cached: &Path,
+    etag: &Path,
+    etag_tmp: &Path,
+) -> Result<FetchOutcome, String> {
+    let max_filesize = feeds::MAX_FEED_BYTES.to_string();
+    let output = curl_base()
+        .arg("--max-filesize")
+        .arg(&max_filesize)
+        .arg("-z")
+        .arg(cached)
+        .arg("--etag-compare")
+        .arg(etag)
+        .arg("--etag-save")
+        .arg(etag_tmp)
+        .arg("-w")
+        .arg("%{http_code}")
+        .arg("-o")
+        .arg(tmp)
+        .arg(url)
+        .output()
+        .map_err(|e| format!("failed to run curl: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "curl failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    classify_http_code(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn classify_http_code(stdout: &str) -> Result<FetchOutcome, String> {
+    match stdout.trim() {
+        "304" => Ok(FetchOutcome::NotModified),
+        code if code.len() == 3 && code.starts_with('2') => Ok(FetchOutcome::Downloaded),
+        other => Err(format!("unexpected HTTP status {other:?}")),
+    }
+}
+
 /// Timestamp helper used by callers that log feed updates.
 pub fn last_update_ts() -> i64 {
     now_secs()
@@ -414,15 +609,9 @@ pub fn last_update_ts() -> i64 {
 mod tests {
     use super::*;
 
-    fn guard() -> (tempfile::TempDir, NetGuard) {
+    fn guard_with(cfg: NetGuardConfig) -> (tempfile::TempDir, NetGuard) {
         let dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(Storage::open_in_memory().unwrap());
-        let cfg = NetGuardConfig {
-            // keep the test hermetic: no network feeds
-            feed_urls: vec![],
-            allowlist: vec!["10.1.1.1".into(), "trusted.example".into()],
-            ..Default::default()
-        };
         let guard = NetGuard::new(
             cfg,
             storage,
@@ -430,6 +619,23 @@ mod tests {
             dir.path().join("data"),
         );
         (dir, guard)
+    }
+
+    fn guard() -> (tempfile::TempDir, NetGuard) {
+        guard_with(NetGuardConfig {
+            // keep the test hermetic: no network feeds
+            feed_urls: vec![],
+            allowlist: vec!["10.1.1.1".into(), "trusted.example".into()],
+            ..Default::default()
+        })
+    }
+
+    /// Write a feed cache file that counts as fresh (`is_fresh`).
+    fn write_cache_file(guard: &NetGuard, url: &str, ext: &str, content: &[u8]) -> PathBuf {
+        std::fs::create_dir_all(&guard.cache_dir).unwrap();
+        let path = guard.cache_dir.join(format!("{}{}", feed_name(url), ext));
+        std::fs::write(&path, content).unwrap();
+        path
     }
 
     #[test]
@@ -491,6 +697,7 @@ mod tests {
         assert_eq!(status.mode, "audit");
         assert_eq!(status.dns_mode, "off");
         assert_eq!(status.allowlist, 2);
+        assert!(!status.feed_signatures, "off by default");
     }
 
     #[test]
@@ -525,5 +732,184 @@ mod tests {
             "example.com_a_b.txt"
         );
         assert!(!feed_name("").is_empty());
+    }
+
+    #[test]
+    fn http_codes_map_to_fetch_outcomes() {
+        assert_eq!(
+            classify_http_code("200\n").unwrap(),
+            FetchOutcome::Downloaded
+        );
+        assert_eq!(classify_http_code("206").unwrap(), FetchOutcome::Downloaded);
+        assert_eq!(
+            classify_http_code("304").unwrap(),
+            FetchOutcome::NotModified
+        );
+        assert!(classify_http_code("301").is_err());
+        assert!(classify_http_code("").is_err());
+        assert!(classify_http_code("20").is_err());
+    }
+
+    #[test]
+    fn temp_files_guard_cleans_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feed.tmp");
+        std::fs::write(&path, b"stale").unwrap();
+        {
+            let _cleanup = TempFiles::new(vec![path.clone()]);
+            assert!(!path.exists(), "stale leftover removed on creation");
+            std::fs::write(&path, b"partial").unwrap();
+        }
+        assert!(!path.exists(), "leftover removed on drop");
+    }
+
+    #[test]
+    fn fresh_signed_cache_skips_without_network() {
+        let url = "https://feed.example/list.txt";
+        let (_d, guard) = guard_with(NetGuardConfig {
+            feed_urls: vec![url.into()],
+            feed_signature_required: true,
+            ..Default::default()
+        });
+        write_cache_file(&guard, url, ".txt", b"203.0.113.9\n");
+        write_cache_file(&guard, url, ".txt.asc", b"-----BEGIN PGP SIGNATURE-----\n");
+
+        let results = guard.update_feeds(false);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].skipped);
+        assert!(results[0].verified);
+        assert!(!results[0].not_modified);
+        assert!(results[0].error.is_none());
+    }
+
+    #[test]
+    fn fresh_unsigned_cache_skips_and_reports_unverified() {
+        let url = "https://feed.example/list.txt";
+        let (_d, guard) = guard_with(NetGuardConfig {
+            feed_urls: vec![url.into()],
+            ..Default::default()
+        });
+        write_cache_file(&guard, url, ".txt", b"203.0.113.9\n");
+
+        let results = guard.update_feeds(false);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].skipped);
+        assert!(!results[0].verified);
+        assert!(results[0].error.is_none());
+    }
+
+    #[test]
+    fn commit_feed_without_signature_requirement_moves_file() {
+        let (_d, guard) = guard();
+        std::fs::create_dir_all(&guard.cache_dir).unwrap();
+        let dest = guard.cache_dir.join("feed.txt");
+        let tmp = guard.cache_dir.join("feed.txt.tmp");
+        let sig_path = guard.cache_dir.join("feed.txt.asc");
+        let sig_tmp = guard.cache_dir.join("feed.txt.tmp.asc");
+        std::fs::write(&dest, b"old\n").unwrap();
+        std::fs::write(&tmp, b"new\n").unwrap();
+
+        let verified = guard.commit_feed(&tmp, &sig_tmp, &dest, &sig_path).unwrap();
+        assert!(!verified);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"new\n");
+        assert!(!sig_path.exists());
+    }
+
+    #[test]
+    fn commit_feed_installs_verified_feed() {
+        use crate::signature::testutil;
+        if !testutil::available() {
+            return;
+        }
+        let fx = testutil::fixture();
+        let (_d, guard) = guard_with(NetGuardConfig {
+            feed_signature_required: true,
+            feed_keyring: fx.keyring.clone(),
+            ..Default::default()
+        });
+        std::fs::create_dir_all(&guard.cache_dir).unwrap();
+        let dest = guard.cache_dir.join("feed.txt");
+        let sig_path = guard.cache_dir.join("feed.txt.asc");
+        let tmp = guard.cache_dir.join("feed.txt.tmp");
+        let sig_tmp = guard.cache_dir.join("feed.txt.tmp.asc");
+        std::fs::write(&dest, b"old\n").unwrap();
+        std::fs::write(&tmp, b"203.0.113.9\n").unwrap();
+        testutil::sign(&fx, &tmp, &sig_tmp);
+
+        let verified = guard.commit_feed(&tmp, &sig_tmp, &dest, &sig_path).unwrap();
+        assert!(verified);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"203.0.113.9\n");
+        assert!(sig_path.exists(), "verified signature is kept as a marker");
+    }
+
+    #[test]
+    fn commit_feed_fails_closed_on_bad_signature() {
+        use crate::signature::testutil;
+        if !testutil::available() {
+            return;
+        }
+        let fx = testutil::fixture();
+        let (_d, guard) = guard_with(NetGuardConfig {
+            feed_signature_required: true,
+            feed_keyring: fx.keyring.clone(),
+            ..Default::default()
+        });
+        std::fs::create_dir_all(&guard.cache_dir).unwrap();
+        let dest = guard.cache_dir.join("feed.txt");
+        let sig_path = guard.cache_dir.join("feed.txt.asc");
+        let tmp = guard.cache_dir.join("feed.txt.tmp");
+        let sig_tmp = guard.cache_dir.join("feed.txt.tmp.asc");
+        std::fs::write(&dest, b"203.0.113.7\n").unwrap();
+        std::fs::write(&tmp, b"203.0.113.7\nattacker.example\n").unwrap();
+        // Valid signature, but of the *previous* content: the download is
+        // not what was signed.
+        let old = guard.cache_dir.join("old.txt");
+        std::fs::write(&old, b"203.0.113.7\n").unwrap();
+        testutil::sign(&fx, &old, &sig_tmp);
+
+        let err = guard
+            .commit_feed(&tmp, &sig_tmp, &dest, &sig_path)
+            .unwrap_err();
+        assert!(err.contains("rejected"), "unexpected error: {err}");
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            b"203.0.113.7\n",
+            "previous cache must be preserved"
+        );
+        assert!(
+            !sig_path.exists(),
+            "rejected signature must not be installed"
+        );
+    }
+
+    #[test]
+    fn commit_feed_requires_signature_when_configured() {
+        let (_d, guard) = guard_with(NetGuardConfig {
+            feed_signature_required: true,
+            feed_keyring: PathBuf::from("/nonexistent/feeds.gpg"),
+            ..Default::default()
+        });
+        std::fs::create_dir_all(&guard.cache_dir).unwrap();
+        let dest = guard.cache_dir.join("feed.txt");
+        let tmp = guard.cache_dir.join("feed.txt.tmp");
+        let sig_path = guard.cache_dir.join("feed.txt.asc");
+        let sig_tmp = guard.cache_dir.join("feed.txt.tmp.asc");
+        std::fs::write(&dest, b"old\n").unwrap();
+        std::fs::write(&tmp, b"new\n").unwrap();
+        std::fs::write(&sig_tmp, b"not a signature").unwrap();
+
+        let err = guard
+            .commit_feed(&tmp, &sig_tmp, &dest, &sig_path)
+            .unwrap_err();
+        assert!(
+            err.contains("gpgv") || err.contains("rejected") || err.contains("failed"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            b"old\n",
+            "cache must stay untouched on verification failure"
+        );
+        assert!(!sig_path.exists());
     }
 }

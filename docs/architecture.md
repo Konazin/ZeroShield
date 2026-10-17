@@ -154,6 +154,14 @@ real sem polling.
   `~/.cache/zeroshield/feeds` (ou cache XDG), parsing de
   IP/CIDR/domínio/comentários, importação para a tabela `net_rules` com
   origem por feed.
+- **Atualização incremental**: re-downloads usam requisições condicionais
+  (`If-Modified-Since` + `ETag` via `curl -z/--etag-compare/--etag-save`);
+  um `304 Not Modified` mantém o cache e pula o parsing.
+- **Assinatura (recomendado)**: com `netguard.feed_signature_required = true`
+  todo feed novo precisa da assinatura destacada `<url>.asc`, verificada por
+  `gpgv` contra `netguard.feed_keyring` (keyring binário, `gpg --export`;
+  nada de `~/.gnupg`). Assinatura ausente ou inválida **descarta o download**
+  e mantém o cache e as regras anteriores (fail-closed).
 - **Decisão**: `Blocklist` puro — allowlist sempre vence, matching por CIDR e
   por sufixo de domínio (`evil.example` cobre `sub.evil.example`).
 - **Aplicação**: o ruleset nftables é **sempre gravado em arquivo**
@@ -241,6 +249,9 @@ node_exporter.
 - O daemon não executa conteúdo escaneado; heurísticas ELF são leitura pura.
 - Feeds são baixados somente via HTTPS (`curl --proto '=https'
   --tlsv1.2`).
+- Assinaturas de feed são verificadas com `gpgv` e keyring próprio, sem
+  estado em `~/.gnupg`; falha de verificação nunca substitui o cache
+  (fail-closed).
 - Unidades systemd endurecidas (`ProtectSystem=strict`, `NoNewPrivileges`,
   `SystemCallFilter=@system-service`), com `ReadWritePaths` restrito a
   `/var/lib/zeroshield` e `/run/zeroshield`.
@@ -255,6 +266,7 @@ nem derrubá-lo com um panic. Os limites atuais:
 | Frame IPC | 1 MiB (sem o `\n`) | `zs_ipc::protocol::MAX_FRAME_BYTES` |
 | Requests em voo por conexão | 64 | `zs_ipc::protocol::MAX_INFLIGHT_REQUESTS` |
 | Arquivo de feed | 64 MiB | `zs_net::feeds::MAX_FEED_BYTES` (+ `curl --max-filesize`) |
+| Arquivo de assinatura | 1 MiB | `zs_net::signature::MAX_SIGNATURE_BYTES` (+ `curl --max-filesize`) |
 | Entradas por feed | 1.000.000 | `zs_net::feeds::MAX_FEED_ENTRIES` |
 | Linha de feed | 8 KiB | `zs_net::feeds::MAX_FEED_LINE_BYTES` |
 | Arquivo de regras | 8 MiB | `zs_scan::rules::MAX_RULE_FILE_BYTES` |

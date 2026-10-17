@@ -74,6 +74,14 @@ feed_urls = [
     "https://rules.emergingthreats.net/blockrules/compromised-ips.txt",
     "https://urlhaus.abuse.ch/downloads/text/",
 ]
+# Require a detached GPG signature (<feed_url>.asc) for every feed before it
+# may replace the cache. Recommended; disabled by default for easy migration.
+# A missing/invalid signature discards the download and keeps the previous
+# rules (fail-closed).
+feed_signature_required = false
+# Public keyring used by gpgv to verify feed signatures (binary export:
+# `gpg --export > /etc/zeroshield/feeds.gpg`).
+feed_keyring = "/etc/zeroshield/feeds.gpg"
 # DNS sinkhole fragment generation: off | dnsmasq | unbound.
 dns_mode = "off"
 dnsmasq_dir = "/etc/dnsmasq.d"

@@ -43,12 +43,15 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl gcc libc6-dev pkg-config
+          apt-get install -y --no-install-recommends ca-certificates curl gcc gnupg libc6-dev pkg-config
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
       - run: cargo test
+        env:
+          # GPG-dependent tests fail (instead of skipping) if gnupg is missing.
+          ZS_REQUIRE_GPG: "1"
 
   test-arch:
     name: test (arch)
@@ -56,12 +59,15 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Install build dependencies
-        run: pacman -Sy --noconfirm --needed base-devel curl
+        run: pacman -Sy --noconfirm --needed base-devel curl gnupg
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
       - run: cargo test
+        env:
+          # GPG-dependent tests fail (instead of skipping) if gnupg is missing.
+          ZS_REQUIRE_GPG: "1"
 
   gui:
     name: build (GTK4 GUI)

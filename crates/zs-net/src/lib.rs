@@ -16,6 +16,7 @@ pub mod dns;
 pub mod feeds;
 pub mod guard;
 pub mod nft;
+pub mod signature;
 
 pub use blocklist::{Blocklist, Decision};
 pub use guard::{ApplyOutcome, AuditResult, FeedUpdateResult, NetGuard, NetStatus};
@@ -45,9 +46,10 @@ impl Module for NetGuard {
     async fn status(&self) -> ModuleStatus {
         let detail = match self.net_status() {
             Ok(s) => format!(
-                "mode={}, rules={}, nft={}, root={}",
+                "mode={}, rules={}, sigs={}, nft={}, root={}",
                 s.mode,
                 s.rule_count,
+                if s.feed_signatures { "required" } else { "off" },
                 if s.nft_available { "yes" } else { "no" },
                 if is_root() { "yes" } else { "no" }
             ),
