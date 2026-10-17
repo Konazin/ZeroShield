@@ -1,0 +1,51 @@
+# Maintainer: ZeroShield contributors <zeroshield@konazin.dev>
+pkgname=zeroshield
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Open-source Linux antivirus: file analyzer, process monitor and embedded IPS"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Konazin/ZeroShield"
+license=('MIT')
+depends=('gcc-libs' 'glibc')
+optdepends=(
+    'nftables: actually block traffic in netguard block mode'
+    'dnsmasq: DNS sinkhole for the network guard'
+    'unbound: DNS sinkhole for the network guard'
+    'libadwaita: GTK4 desktop client (build zs-gui separately)'
+)
+makedepends=('cargo' 'rust')
+backup=('etc/zeroshield/config.toml')
+install="$pkgname.install"
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "ZeroShield-$pkgver"
+    cargo build --release --locked
+}
+
+check() {
+    cd "ZeroShield-$pkgver"
+    cargo test --release
+}
+
+package() {
+    cd "ZeroShield-$pkgver"
+
+    install -Dm755 target/release/zeroshield "$pkgdir/usr/bin/zeroshield"
+    install -Dm755 target/release/zeroshieldd "$pkgdir/usr/bin/zeroshieldd"
+
+    install -Dm644 packaging/config.toml "$pkgdir/etc/zeroshield/config.toml"
+
+    install -Dm644 packaging/systemd/zeroshieldd.service \
+        "$pkgdir/usr/lib/systemd/system/zeroshieldd.service"
+    install -Dm644 packaging/systemd/zeroshield-scan.service \
+        "$pkgdir/usr/lib/systemd/system/zeroshield-scan.service"
+    install -Dm644 packaging/systemd/zeroshield-scan.timer \
+        "$pkgdir/usr/lib/systemd/system/zeroshield-scan.timer"
+    install -Dm644 packaging/tmpfiles/zeroshield.conf \
+        "$pkgdir/usr/lib/tmpfiles.d/zeroshield.conf"
+
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

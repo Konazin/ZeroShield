@@ -1,0 +1,14 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Python (plugin SDK / automation layer)
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+
+# Local runtime data
+*.zsq
+/zeroshield-data/

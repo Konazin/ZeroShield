@@ -1,0 +1,25 @@
+post_install() {
+    if command -v systemd-tmpfiles >/dev/null 2>&1; then
+        systemd-tmpfiles --create /usr/lib/tmpfiles.d/zeroshield.conf >/dev/null 2>&1 || true
+    fi
+    cat <<'EOF'
+==> ZeroShield installed.
+    Start the daemon with:      systemctl enable --now zeroshieldd
+    Enable the daily scan with: systemctl enable --now zeroshield-scan.timer
+    The network guard starts in audit mode; nothing is blocked until you
+    opt in via /etc/zeroshield/config.toml (netguard.mode = "block")
+    and `zeroshield net apply --yes`.
+EOF
+}
+
+post_upgrade() {
+    post_install
+}
+
+pre_remove() {
+    if [ -d /run/systemd/system ]; then
+        systemctl disable --now zeroshield-scan.timer >/dev/null 2>&1 || true
+        systemctl stop zeroshieldd.service >/dev/null 2>&1 || true
+    fi
+    true
+}

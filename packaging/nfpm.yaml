@@ -1,0 +1,62 @@
+# nfpm configuration: builds the .deb / .rpm / .apk packages from the
+# release binaries.
+#
+#   cargo build --release
+#   VERSION=0.1.0 nfpm package -f packaging/nfpm.yaml -p deb -t dist/
+#
+name: zeroshield
+arch: amd64
+platform: linux
+version: ${VERSION}
+section: utils
+priority: optional
+maintainer: ZeroShield contributors <zeroshield@konazin.dev>
+description: |
+  Open-source Linux antivirus (Debian + Arch compatible).
+
+  ZeroShield ships a file analyzer (hash signatures, content rules and ELF
+  heuristics), a process monitor that scores potentially malicious processes
+  and an embedded IPS (threat feeds, nftables outbound blocking and DNS
+  sinkholes). The privileged daemon (zeroshieldd) is driven by an
+  unprivileged CLI and an optional GTK4 desktop client.
+vendor: ZeroShield
+homepage: https://github.com/Konazin/ZeroShield
+license: MIT
+depends:
+  - ca-certificates
+recommends:
+  - nftables
+  - dnsmasq
+
+contents:
+  - src: target/release/zeroshield
+    dst: /usr/bin/zeroshield
+    file_info:
+      mode: 0755
+  - src: target/release/zeroshieldd
+    dst: /usr/bin/zeroshieldd
+    file_info:
+      mode: 0755
+
+  - src: packaging/systemd/zeroshieldd.service
+    dst: /usr/lib/systemd/system/zeroshieldd.service
+  - src: packaging/systemd/zeroshield-scan.service
+    dst: /usr/lib/systemd/system/zeroshield-scan.service
+  - src: packaging/systemd/zeroshield-scan.timer
+    dst: /usr/lib/systemd/system/zeroshield-scan.timer
+
+  - src: packaging/tmpfiles/zeroshield.conf
+    dst: /usr/lib/tmpfiles.d/zeroshield.conf
+
+  - src: packaging/config.toml
+    dst: /etc/zeroshield/config.toml
+    type: config|noreplace
+
+  - src: README.md
+    dst: /usr/share/doc/zeroshield/README.md
+  - src: LICENSE
+    dst: /usr/share/doc/zeroshield/LICENSE
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh

@@ -1,0 +1,25 @@
+[package]
+name = "zs-cli"
+description = "ZeroShield command line interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "zeroshield"
+path = "src/main.rs"
+
+[dependencies]
+zs-core.workspace = true
+zs-ipc.workspace = true
+zs-scan.workspace = true
+zs-proc.workspace = true
+zs-net.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+tokio.workspace = true
+libc.workspace = true
+tracing.workspace = true

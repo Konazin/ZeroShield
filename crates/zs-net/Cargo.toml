@@ -1,0 +1,19 @@
+[package]
+name = "zs-net"
+description = "ZeroShield network guard: threat feeds, nftables rules and DNS filtering"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zs-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

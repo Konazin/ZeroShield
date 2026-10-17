@@ -1,0 +1,16 @@
+[Unit]
+Description=ZeroShield scan of /home (report only)
+Documentation=https://github.com/Konazin/ZeroShield
+After=local-fs.target
+
+[Service]
+Type=oneshot
+# Exit code 2 means "threats found" — that is a successful scan, not a failure.
+SuccessExitStatus=0 2
+ExecStart=/usr/bin/zeroshield scan /home
+User=root
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/zeroshield /run/zeroshield
+PrivateTmp=yes

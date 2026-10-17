@@ -1,0 +1,32 @@
+# nfpm configuration for the optional GTK4 desktop client.
+#
+#   cargo build --release -p zs-gui
+#   VERSION=0.1.0 nfpm package -f packaging/nfpm-gui.yaml -p deb -t dist/
+#
+name: zeroshield-gui
+arch: amd64
+platform: linux
+version: ${VERSION}
+section: utils
+priority: optional
+maintainer: ZeroShield contributors <zeroshield@konazin.dev>
+description: |
+  GTK4/libadwaita desktop client for the ZeroShield antivirus daemon.
+  Pure client: all decisions stay in zeroshieldd.
+vendor: ZeroShield
+homepage: https://github.com/Konazin/ZeroShield
+license: MIT
+depends:
+  - zeroshield
+  - libgtk-4-1
+  - libadwaita-1-0
+
+contents:
+  - src: target/release/zeroshield-gui
+    dst: /usr/bin/zeroshield-gui
+    file_info:
+      mode: 0755
+  - src: packaging/desktop/zeroshield-gui.desktop
+    dst: /usr/share/applications/zeroshield-gui.desktop
+  - src: packaging/desktop/zeroshield.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/zeroshield.svg

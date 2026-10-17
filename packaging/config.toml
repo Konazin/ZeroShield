@@ -1,0 +1,65 @@
+# ZeroShield configuration (example)
+#
+# Lookup order: $ZS_CONFIG > /etc/zeroshield/config.toml >
+#               ~/.config/zeroshield/config.toml
+# Every key is optional: missing keys keep their built-in defaults.
+
+[general]
+# tracing filter for the daemon: trace | debug | info | warn | error
+log_level = "info"
+# Emit JSON logs (handy for journald shipping / ELK).
+log_json = false
+
+[scanner]
+recursive = true
+follow_symlinks = false
+# Files larger than this are skipped (bytes).
+max_file_size = 536870912          # 512 MiB
+# Minimum score for a file to be reported as a finding (0-100).
+min_report_score = 20
+# Automatically quarantine malicious files found during a scan.
+quarantine = false
+# Reuse hashes of unchanged files between scans (mtime based).
+hash_cache = true
+clean_cache_ttl_secs = 604800      # 7 days
+# Amount of each file inspected for content rules (bytes).
+content_scan_max_bytes = 16777216  # 16 MiB
+# Extra directories containing *.toml rule files.
+rule_dirs = ["/usr/share/zeroshield/rules"]
+exclude_dirs = [".git", "node_modules", "__pycache__"]
+
+[procmon]
+# /proc polling watcher for potentially malicious processes.
+enabled = true
+poll_interval_secs = 5
+# Minimum score for a process to raise an alert (0-100).
+alert_score = 40
+# Report every new process, not only suspicious ones (debugging).
+report_all_new = false
+
+[netguard]
+# Embedded IPS. Starts disabled and in audit mode: nothing is blocked
+# until you opt in with mode = "block" AND run `zeroshield net apply --yes`
+# as root.
+enabled = false
+mode = "audit"                     # audit | block
+nft_table = "zeroshield"
+feed_cache_ttl_secs = 21600        # 6 hours
+feed_urls = [
+    "https://feodotracker.abuse.ch/downloads/ipblocklist.txt",
+    "https://sslbl.abuse.ch/blacklist/sslipblacklist.txt",
+    "https://rules.emergingthreats.net/blockrules/compromised-ips.txt",
+    "https://urlhaus.abuse.ch/downloads/text/",
+]
+# DNS sinkhole fragment generation: off | dnsmasq | unbound.
+dns_mode = "off"
+dnsmasq_dir = "/etc/dnsmasq.d"
+unbound_dir = "/etc/unbound/unbound.conf.d"
+# Never blocked (IPs, CIDRs or domains).
+allowlist = []
+# Always blocked, in addition to the feeds (IPs, CIDRs or domains).
+blocklist = []
+
+[storage]
+# Override the SQLite database location (default: <data_dir>/zeroshield.db).
+# path = "/var/lib/zeroshield/zeroshield.db"

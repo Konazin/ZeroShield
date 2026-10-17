@@ -1,0 +1,112 @@
+# ZeroShield built-in content rules.
+# These ship inside the binary and are always active. Site rules can add more
+# by dropping *.toml files into scanner.rule_dirs (default
+# /usr/share/zeroshield/rules).
+
+[[rule]]
+name = "eicar"
+description = "EICAR standard antivirus test file"
+severity = "critical"
+score = 100
+tags = ["eicar", "test"]
+pattern_kind = "eicar"
+
+[[rule]]
+name = "script/reverse_shell_devtcp"
+description = "shell script opens a TCP socket via /dev/tcp (typical reverse shell)"
+severity = "high"
+score = 70
+tags = ["reverse-shell", "script", "lolbin"]
+pattern = "/dev/tcp/"
+pattern_kind = "text"
+
+[[rule]]
+name = "script/netcat_exec"
+description = "netcat executed with -e/-c (bind/reverse shell)"
+severity = "high"
+score = 65
+tags = ["reverse-shell", "script"]
+pattern = "nc -e "
+pattern_kind = "text"
+
+[[rule]]
+name = "script/download_pipe_shell"
+description = "downloads a remote payload and pipes it into a shell"
+severity = "high"
+score = 60
+tags = ["downloader", "script"]
+pattern_kind = "all_of"
+all_of = ["| sh", "wget "]
+
+[[rule]]
+name = "script/curl_pipe_shell"
+description = "downloads a remote payload with curl and pipes it into a shell"
+severity = "high"
+score = 60
+tags = ["downloader", "script"]
+pattern_kind = "all_of"
+all_of = ["| sh", "curl "]
+
+[[rule]]
+name = "script/base64_decode_exec"
+description = "base64 decoded payload piped to a shell (obfuscated execution)"
+severity = "medium"
+score = 45
+tags = ["obfuscation", "script"]
+pattern_kind = "all_of"
+all_of = ["base64 -d", "| sh"]
+
+[[rule]]
+name = "miner/xmrig"
+description = "XMRig cryptocurrency miner marker"
+severity = "high"
+score = 85
+tags = ["miner"]
+pattern = "xmrig"
+pattern_kind = "text"
+case_insensitive = true
+
+[[rule]]
+name = "miner/stratum_pool"
+description = "mining pool URL (stratum protocol)"
+severity = "high"
+score = 75
+tags = ["miner"]
+pattern = "stratum+tcp://"
+pattern_kind = "text"
+
+[[rule]]
+name = "persist/ld_preload"
+description = "sets LD_PRELOAD (library injection / persistence)"
+severity = "medium"
+score = 50
+tags = ["persistence", "injection"]
+pattern = "LD_PRELOAD="
+pattern_kind = "text"
+
+[[rule]]
+name = "persist/history_wipe"
+description = "wipes shell history (anti-forensics)"
+severity = "low"
+score = 35
+tags = ["anti-forensics"]
+pattern = "history -c"
+pattern_kind = "text"
+
+[[rule]]
+name = "creds/ssh_key_exfil"
+description = "reads SSH private keys and sends them over the network"
+severity = "high"
+score = 75
+tags = ["exfiltration", "credentials"]
+pattern_kind = "all_of"
+all_of = ["id_rsa", "curl"]
+
+[[rule]]
+name = "script/hidden_exec_python"
+description = "python one-liner that decodes and executes a base64 payload"
+severity = "medium"
+score = 50
+tags = ["obfuscation", "python"]
+pattern_kind = "all_of"
+all_of = ["base64", "exec("]

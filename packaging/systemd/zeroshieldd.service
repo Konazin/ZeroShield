@@ -1,0 +1,45 @@
+[Unit]
+Description=ZeroShield antivirus daemon
+Documentation=https://github.com/Konazin/ZeroShield
+After=network-online.target local-fs.target
+Wants=network-online.target
+ConditionPathExists=/etc/zeroshield/config.toml
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/zeroshieldd
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+# The daemon reads /proc for every process and, in block mode, shells out to
+# nft(8) which requires root. Once the eBPF backend lands (M3) this can drop
+# to a dedicated user with CAP_BPF/CAP_NET_ADMIN.
+User=root
+
+RuntimeDirectory=zeroshield
+RuntimeDirectoryMode=0700
+StateDirectory=zeroshield
+StateDirectoryMode=0700
+ConfigurationDirectory=zeroshield
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/zeroshield /run/zeroshield
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Note: do NOT set ProtectProc=invisible — the process monitor needs to read
+# /proc/<pid> of every process.
+
+[Install]
+WantedBy=multi-user.target
