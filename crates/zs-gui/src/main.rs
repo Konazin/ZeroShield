@@ -216,9 +216,9 @@ fn build_ui(app: &adw::Application) {
     }
     {
         let cmd_tx = cmd_tx.clone();
-        let audit_entry = audit_entry.clone();
+        let entry = audit_entry.clone();
         audit_entry.connect_activate(move |_| {
-            let target = audit_entry.text().to_string();
+            let target = entry.text().to_string();
             if !target.trim().is_empty() {
                 let _ = cmd_tx.send(Cmd::NetAudit(target.trim().to_string()));
             }
