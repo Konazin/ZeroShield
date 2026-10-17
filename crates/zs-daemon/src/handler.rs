@@ -2,10 +2,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, Notify};
 
+use zs_core::config::WatchConfig;
 use zs_core::error::{ZsError, ZsResult};
 use zs_core::event::Event;
 use zs_core::model::{ScanOptions, Severity};
@@ -16,6 +18,8 @@ use zs_ipc::{EventEnvelope, Frame, FrameTx, Handler, Request};
 use zs_net::NetGuard;
 use zs_proc::ProcMonitor;
 use zs_scan::{Progress, Quarantine, Scanner};
+
+use crate::watch::WatchManager;
 
 pub struct State {
     pub version: String,
@@ -28,6 +32,9 @@ pub struct State {
     pub quarantine: Arc<Quarantine>,
     pub procmon: Arc<ProcMonitor>,
     pub netguard: Arc<NetGuard>,
+    pub watches: Arc<WatchManager>,
+    /// Defaults for `watch.fs.start` requests.
+    pub watch_cfg: WatchConfig,
     pub shutdown: Arc<Notify>,
     /// Daemon-wide event bus: everything sent here reaches watching clients.
     pub events: broadcast::Sender<Event>,
@@ -125,6 +132,9 @@ async fn dispatch(state: Arc<State>, method: &str, params: Value, tx: FrameTx) -
             // flowing to this client until it disconnects.
             Ok(json!({"watching": true}))
         }
+        methods::WATCH_FS_START => watch_fs_start(&state, params),
+        methods::WATCH_FS_STOP => watch_fs_stop(&state, params),
+        methods::WATCH_FS_LIST => Ok(json!({ "sessions": state.watches.list() })),
         other => Err(ZsError::Ipc(format!("unknown method '{other}'"))),
     }
 }
@@ -137,12 +147,63 @@ fn limit_param(params: &Value, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
+fn watch_fs_start(state: &Arc<State>, params: Value) -> ZsResult<Value> {
+    let paths: Vec<PathBuf> = params
+        .get("paths")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let paths = if paths.is_empty() {
+        state.watch_cfg.paths.clone()
+    } else {
+        paths
+    };
+
+    let quarantine = params
+        .get("quarantine")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(state.watch_cfg.quarantine);
+    let recursive = params
+        .get("recursive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(state.watch_cfg.recursive);
+    let debounce_ms = params
+        .get("debounce_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(state.watch_cfg.debounce_ms)
+        .min(60_000);
+
+    let session = state.watches.start(
+        paths,
+        quarantine,
+        recursive,
+        Duration::from_millis(debounce_ms),
+    )?;
+    Ok(json!({
+        "session": session,
+        "sessions": state.watches.list(),
+    }))
+}
+
+fn watch_fs_stop(state: &Arc<State>, params: Value) -> ZsResult<Value> {
+    let paths: Vec<PathBuf> = params
+        .get("paths")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let selection = match paths.is_empty() {
+        true => None,
+        false => Some(paths.as_slice()),
+    };
+    let stopped = state.watches.stop(selection);
+    Ok(json!({ "stopped": stopped, "sessions": state.watches.list() }))
+}
+
 async fn modules(state: &Arc<State>) -> ZsResult<Value> {
     use zs_core::module::Module;
     let scanner = state.scanner.status().await;
     let procmon = state.procmon.status().await;
     let netguard = state.netguard.status().await;
-    Ok(json!({ "modules": [scanner, procmon, netguard] }))
+    let watches = state.watches.status();
+    Ok(json!({ "modules": [scanner, procmon, netguard, watches] }))
 }
 
 async fn status(state: &Arc<State>) -> ZsResult<Value> {
@@ -150,6 +211,7 @@ async fn status(state: &Arc<State>) -> ZsResult<Value> {
     let scanner = state.scanner.status().await;
     let procmon = state.procmon.status().await;
     let netguard = state.netguard.status().await;
+    let watches = state.watches.status();
     let net_status = state.netguard.net_status()?;
     let uptime = now_secs() - state.started_at;
 
@@ -164,8 +226,11 @@ async fn status(state: &Arc<State>) -> ZsResult<Value> {
         "rules": state.scanner.rules().len(),
         "signatures": state.storage.signature_count()?,
         "quarantine_entries": state.quarantine.list()?.len(),
+        "clean_cache_entries": state.storage.clean_cache_len().unwrap_or(0),
+        "watch_sessions": state.watches.session_count(),
+        "watched_dirs": state.watches.watched_dirs_total(),
         "net_rules": net_status.rule_count,
-        "modules": [scanner, procmon, netguard],
+        "modules": [scanner, procmon, netguard, watches],
     }))
 }
 
@@ -187,6 +252,8 @@ async fn scan_run(state: &Arc<State>, params: Value, tx: FrameTx) -> ZsResult<Va
             quarantine: state.scanner.config().quarantine,
             content_scan: true,
             hash_cache: state.scanner.config().hash_cache,
+            clean_cache: state.scanner.config().clean_cache,
+            record: true,
         },
     };
 

@@ -719,6 +719,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "inotify"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cc00ea907cab49550b7da656f80ebb97be1b997d931fbcd28d39734e17ce592"
+dependencies = [
+ "bitflags",
+ "inotify-sys",
+ "libc",
+]
+
+[[package]]
+name = "inotify-sys"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c033f80b2c113cdf91ab7a33faa9cbc014726dcad99880c8609af2a370edf37d"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1577,6 +1597,7 @@ dependencies = [
  "zs-net",
  "zs-proc",
  "zs-scan",
+ "zs-watch",
 ]
 
 [[package]]
@@ -1603,6 +1624,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1611,6 +1633,7 @@ dependencies = [
  "zs-net",
  "zs-proc",
  "zs-scan",
+ "zs-watch",
 ]
 
 [[package]]
@@ -1684,4 +1707,15 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "zs-core",
+]
+
+[[package]]
+name = "zs-watch"
+version = "0.1.0"
+dependencies = [
+ "inotify",
+ "tempfile",
+ "tracing",
+ "zs-core",
+ "zs-scan",
 ]

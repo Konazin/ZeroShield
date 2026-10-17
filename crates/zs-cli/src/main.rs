@@ -50,6 +50,9 @@ enum Command {
     /// Process monitor
     Proc(ProcCmd),
 
+    /// Real-time file watching (daemon sessions)
+    Watch(WatchCmd),
+
     /// Quarantine management
     Quarantine(QuarantineCmd),
 
@@ -128,6 +131,32 @@ enum ProcAction {
     },
     /// Watch for new suspicious processes
     Watch,
+}
+
+#[derive(Args, Debug)]
+struct WatchCmd {
+    /// Directories to watch (defaults to watch.paths from the configuration)
+    paths: Vec<PathBuf>,
+
+    /// Quarantine malicious files immediately
+    #[arg(short = 'q', long)]
+    quarantine: bool,
+
+    /// Do not watch subdirectories
+    #[arg(long)]
+    no_recursive: bool,
+
+    /// Start the session in the daemon and exit
+    #[arg(long)]
+    detach: bool,
+
+    /// List active watch sessions and exit
+    #[arg(long)]
+    list: bool,
+
+    /// Stop sessions: all, or only those covering the given paths
+    #[arg(long)]
+    stop: bool,
 }
 
 #[derive(Args, Debug)]
@@ -279,6 +308,21 @@ async fn run_command(ctx: &Ctx, cli: Cli) -> ZsResult<i32> {
             }
             Ok(0)
         }
+        Some(Command::Watch(cmd)) => {
+            commands::cmd_watch(
+                ctx,
+                commands::WatchArgs {
+                    paths: cmd.paths,
+                    quarantine: cmd.quarantine,
+                    recursive: !cmd.no_recursive,
+                    detach: cmd.detach,
+                    list: cmd.list,
+                    stop: cmd.stop,
+                },
+            )
+            .await?;
+            Ok(0)
+        }
         Some(Command::Quarantine(cmd)) => {
             match cmd.action {
                 QuarantineAction::List => commands::cmd_quarantine_list(ctx).await?,
@@ -357,7 +401,7 @@ async fn shell(ctx: &Ctx) {
             "exit" | "quit" => break,
             "help" => {
                 println!(
-                    "commands:\n  status\n  scan <path> [--quarantine] [--min-score N]\n  proc list [--min-score N]\n  proc watch\n  quarantine list|restore <id>|purge <id>\n  rules list|check <file>|import <file>\n  net status|audit <targets...>|feeds update|feeds list|apply|dns\n  events [-n N]\n  findings [-n N]\n  modules\n  clear\n  exit"
+                    "commands:\n  status\n  scan <path> [--quarantine] [--min-score N]\n  proc list [--min-score N]\n  proc watch\n  watch <dirs...> [-q] [--detach|--list|--stop]\n  quarantine list|restore <id>|purge <id>\n  rules list|check <file>|import <file>\n  net status|audit <targets...>|feeds update|feeds list|apply|dns\n  events [-n N] [--follow]\n  findings [-n N]\n  modules\n  clear\n  exit"
                 );
                 continue;
             }

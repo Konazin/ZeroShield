@@ -346,6 +346,39 @@ impl RuleSet {
             .collect()
     }
 
+    /// Stable fingerprint of the loaded rules (order sensitive). Used to
+    /// invalidate the clean-file cache when the rule set changes.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for r in &self.rules {
+            hasher.update(r.name.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(r.description.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(r.severity.as_str().as_bytes());
+            hasher.update(b"\0");
+            hasher.update(r.score.to_le_bytes());
+            hasher.update(b"\0");
+            hasher.update(r.source.as_bytes());
+            hasher.update(b"\0");
+            for t in &r.tags {
+                hasher.update(t.as_bytes());
+                hasher.update(b"\0");
+            }
+            hasher.update(b"\x01");
+            for e in &r.extensions {
+                hasher.update(e.as_bytes());
+                hasher.update(b"\0");
+            }
+            hasher.update(b"\x02");
+            hasher.update(r.max_scan_bytes.unwrap_or(0).to_le_bytes());
+            hasher.update(format!("{:?}", r.matcher).as_bytes());
+            hasher.update(b"\x03");
+        }
+        hex::encode(hasher.finalize())
+    }
+
     /// Run every applicable rule against a content buffer.
     pub fn check(&self, buf: &[u8], path: &Path) -> Vec<Detection> {
         let ext = path
@@ -478,5 +511,41 @@ pattern = "4"
 "#;
         let mut set = RuleSet::new();
         assert!(set.load_toml(text, "test").is_err());
+    }
+
+    #[test]
+    fn fingerprint_tracks_rule_changes() {
+        let a = RuleSet::with_embedded().unwrap();
+        let b = RuleSet::with_embedded().unwrap();
+        assert_eq!(a.fingerprint(), b.fingerprint());
+
+        let mut c = RuleSet::with_embedded().unwrap();
+        c.load_toml(
+            r#"
+[[rule]]
+name = "test/extra"
+pattern = "extra-pattern"
+pattern_kind = "text"
+score = 40
+"#,
+            "test",
+        )
+        .unwrap();
+        assert_ne!(a.fingerprint(), c.fingerprint());
+
+        // Same rule, different score: must change the fingerprint.
+        let mut d = RuleSet::with_embedded().unwrap();
+        d.load_toml(
+            r#"
+[[rule]]
+name = "test/extra"
+pattern = "extra-pattern"
+pattern_kind = "text"
+score = 60
+"#,
+            "test",
+        )
+        .unwrap();
+        assert_ne!(c.fingerprint(), d.fingerprint());
     }
 }

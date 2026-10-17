@@ -21,12 +21,35 @@ min_report_score = 20
 quarantine = false
 # Reuse hashes of unchanged files between scans (mtime based).
 hash_cache = true
+# Reuse the verdict of files already scanned clean (same size/mtime and
+# same signature/rules version) without reading them again.
+clean_cache = true
+clean_cache_max_entries = 200000
 clean_cache_ttl_secs = 604800      # 7 days
 # Amount of each file inspected for content rules (bytes).
 content_scan_max_bytes = 16777216  # 16 MiB
 # Extra directories containing *.toml rule files.
 rule_dirs = ["/usr/share/zeroshield/rules"]
 exclude_dirs = [".git", "node_modules", "__pycache__"]
+
+[watch]
+# Real-time file watching (inotify). When enabled, the daemon starts a
+# session for every directory in `paths` at boot; new and changed files are
+# scanned as they settle.
+enabled = false
+paths = ["/home", "/tmp"]
+quarantine = false
+recursive = true
+# Quiet period after the last write before a file is scanned (milliseconds).
+debounce_ms = 800
+
+[automount]
+# Scan removable media automatically when it is mounted (the daemon polls
+# /proc/mounts; no udev/udisks dependency).
+enabled = false
+poll_interval_secs = 5
+roots = ["/media", "/run/media", "/mnt"]
+quarantine = false
 
 [procmon]
 # /proc polling watcher for potentially malicious processes.

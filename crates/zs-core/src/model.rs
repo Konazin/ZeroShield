@@ -173,6 +173,12 @@ pub struct ScanOptions {
     pub quarantine: bool,
     pub content_scan: bool,
     pub hash_cache: bool,
+    /// Reuse the verdict of files already scanned clean (unchanged size/mtime
+    /// and same signature/rules version).
+    pub clean_cache: bool,
+    /// Persist a row for this scan in the history (disabled for per-file scans
+    /// issued by the real-time watcher).
+    pub record: bool,
 }
 
 impl Default for ScanOptions {
@@ -185,6 +191,8 @@ impl Default for ScanOptions {
             quarantine: false,
             content_scan: true,
             hash_cache: true,
+            clean_cache: true,
+            record: true,
         }
     }
 }
@@ -202,6 +210,9 @@ pub struct ScanSummary {
     pub max_score: u32,
     pub verdict: Verdict,
     pub duration_ms: u64,
+    /// Files whose verdict came from the clean-file cache.
+    #[serde(default)]
+    pub cached: u64,
 }
 
 /// Full scan report returned by the engine.
@@ -218,6 +229,9 @@ pub struct ScanReport {
     pub findings: Vec<Finding>,
     pub verdict: Verdict,
     pub max_score: u32,
+    /// Files whose verdict came from the clean-file cache.
+    #[serde(default)]
+    pub cached: u64,
 }
 
 impl ScanReport {
@@ -233,6 +247,7 @@ impl ScanReport {
             max_score: self.max_score,
             verdict: self.verdict,
             duration_ms: self.duration_ms,
+            cached: self.cached,
         }
     }
 }

@@ -35,6 +35,29 @@ pub enum Event {
     ProcAlert {
         alert: ProcAlert,
     },
+    /// A real-time watcher session started for the given roots.
+    WatchStarted {
+        paths: Vec<String>,
+    },
+    /// A real-time watcher session stopped.
+    WatchStopped {
+        paths: Vec<String>,
+    },
+    /// A file hit by the real-time watcher was flagged.
+    WatchFinding {
+        finding: Finding,
+    },
+    /// The watcher failed to process a path (not a threat).
+    WatchError {
+        path: String,
+        message: String,
+    },
+    /// A removable device was mounted below the watched roots.
+    DeviceMounted {
+        device: String,
+        mountpoint: String,
+        fstype: String,
+    },
     NetAlert {
         message: String,
         severity: Severity,
@@ -61,6 +84,11 @@ impl Event {
             Event::ScanFinding { .. } => "scan_finding",
             Event::ScanFinished { .. } => "scan_finished",
             Event::ProcAlert { .. } => "proc_alert",
+            Event::WatchStarted { .. } => "watch_started",
+            Event::WatchStopped { .. } => "watch_stopped",
+            Event::WatchFinding { .. } => "watch_finding",
+            Event::WatchError { .. } => "watch_error",
+            Event::DeviceMounted { .. } => "device_mounted",
             Event::NetAlert { .. } => "net_alert",
             Event::Info { .. } => "info",
             Event::Warning { .. } => "warning",
@@ -79,6 +107,10 @@ impl Event {
                 _ => Severity::Info,
             },
             Event::ProcAlert { alert } => alert.severity,
+            Event::WatchStarted { .. } | Event::WatchStopped { .. } => Severity::Info,
+            Event::WatchFinding { finding } => finding.severity,
+            Event::WatchError { .. } => Severity::Low,
+            Event::DeviceMounted { .. } => Severity::Medium,
             Event::NetAlert { severity, .. } => *severity,
             Event::Info { .. } => Severity::Info,
             Event::Warning { .. } => Severity::Medium,
@@ -116,5 +148,24 @@ mod tests {
             bytes_scanned: 2,
         };
         assert!(!ev.is_persistent());
+    }
+
+    #[test]
+    fn watch_events_roundtrip() {
+        let ev = Event::WatchStarted {
+            paths: vec!["/home".into()],
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"type\":\"watch_started\""));
+        assert_eq!(ev.kind(), "watch_started");
+        assert!(ev.is_persistent());
+
+        let ev = Event::DeviceMounted {
+            device: "/dev/sdb1".into(),
+            mountpoint: "/media/usb".into(),
+            fstype: "vfat".into(),
+        };
+        let back: Event = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        assert_eq!(back.kind(), "device_mounted");
     }
 }

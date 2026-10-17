@@ -17,6 +17,7 @@ zs-ipc.workspace = true
 zs-scan.workspace = true
 zs-proc.workspace = true
 zs-net.workspace = true
+zs-watch.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true
@@ -24,3 +25,6 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 libc.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

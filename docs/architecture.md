@@ -20,6 +20,7 @@ de segurança.
         | zeroshieldd (root)           |
         |   zs-ipc:  dispatch JSON-RPC |
         |   zs-scan: pipeline de scan  |
+        |   zs-watch: inotify/mounts   |
         |   zs-proc: watcher /proc     |
         |   zs-net:  feeds/nft/DNS     |
         +--------------+---------------+
@@ -38,6 +39,7 @@ contêiner, mas todas as decisões e o estado vivem no mesmo código de crate.
 | `zs-core`   | Config TOML, resolução de caminhos (XDG/root), modelo de dados, eventos, storage SQLite, contrato de módulo |
 | `zs-ipc`    | Protocolo (frames JSON), servidor Unix com broadcast de eventos, cliente |
 | `zs-scan`   | Hashes (md5/sha1/sha256), motor de regras de conteúdo, heurísticas ELF (goblin), assinaturas, quarentena, pipeline do scanner |
+| `zs-watch`  | Tempo real: watcher inotify (recursivo, debounce) e observador de `/proc/mounts` para mídia removível |
 | `zs-proc`   | Leitura de `/proc`, heurísticas de pontuação de processos, watcher por polling |
 | `zs-net`    | Parsing de feeds, lógica block/allow (IP/CIDR/domínio), geração de ruleset nftables, fragmentos DNS (dnsmasq/Unbound), NetGuard |
 | `zs-cli`    | Comandos, renderização, shell interativo (`zeroshield`)               |
@@ -73,7 +75,8 @@ Cada frame é uma linha JSON:
 Métodos: `status`, `modules`, `scan.run`, `proc.list`, `proc.audit`,
 `quarantine.list|restore|purge`, `sigs.import`, `rules.list`,
 `events.list`, `findings.list`, `net.status`, `net.audit`,
-`net.feeds.update`, `net.apply`, `net.dns`, `watch.start`, `daemon.shutdown`.
+`net.feeds.update`, `net.apply`, `net.dns`, `watch.start`,
+`watch.fs.start|stop|list`, `daemon.shutdown`.
 
 ## Fluxo de uma varredura
 
@@ -84,10 +87,14 @@ Métodos: `status`, `modules`, `scan.run`, `proc.list`, `proc.audit`,
 3. O pipeline percorre o alvo (sem seguir symlinks por padrão), aplica
    exclusões, e para cada arquivo:
    - respeita `max_file_size` e o cache de hash (mtime + tamanho);
+   - consulta o **cache de arquivos limpos** (`clean_cache`): se o arquivo
+     já foi escaneado limpo com o mesmo tamanho/mtime e a mesma versão de
+     assinaturas/regras, ele é contado como `cached` e não é relido;
    - calcula md5/sha1/sha256 e consulta o banco de assinaturas;
    - com arquivo ≤ `content_scan_max_bytes`, aplica as regras de conteúdo;
    - se for ELF, roda as heurísticas (RWX, entropia, marcadores de mineração);
    - soma os scores; arquivos com score ≥ `min_report_score` viram `Finding`;
+   - arquivos com score 0 entram no cache de limpos (chave: caminho);
    - com quarentena ligada, o arquivo malicioso é movido para
      `/var/lib/zeroshield/quarantine` com modo `000`.
 4. Cada achado vira evento (`scan_finding`); o resumo final é persistido
@@ -114,6 +121,30 @@ Processos com score ≥ `procmon.alert_score` geram evento `proc_alert`,
 persistido e transmitido no broadcast. O backend atual é polling portátil;
 eBPF (aya) está planejado atrás de feature flag no M9 para eventos em tempo
 real sem polling.
+
+## Tempo real (zs-watch)
+
+- **Sessões**: `watch.fs.start` cria uma sessão no daemon (inotify, um
+  `inotify` fd por sessão, thread dedicada com fd não-bloqueante e poll de
+  ~25 ms). `watch.fs.stop` encerra (todas ou só as que cobrem um caminho) e
+  `watch.fs.list` mostra as ativas. Com `watch.enabled` no config, o daemon
+  inicia sessões no boot.
+- **Escaneamento**: eventos `CLOSE_WRITE`/`MOVED_TO` entram numa fila com
+  debounce configurável; quando o arquivo "assenta", ele passa pelo mesmo
+  pipeline (`scan_named`) com `record: false` (não polui o histórico de
+  scans) e quarentena opcional. Diretórios criados/movidos são registrados
+  recursivamente; renomeações de diretório são rebaseadas via *move cookie*
+  do inotify. Overflow de fila do kernel vira evento `warning`.
+- **Armamento**: `watch.fs.start` só responde depois que os watches iniciais
+  estão registrados, então um arquivo criado logo após o retorno do comando
+  já é visto.
+- **Mídia removível**: o daemon observa `/proc/mounts` a cada
+  `automount.poll_interval_secs` sob as raízes configuradas (`/media`,
+  `/run/media`, `/mnt`) — sem depender de udev/udisks — emite
+  `device_mounted` e escaneia a montagem nova com registro normal no
+  histórico.
+- **Sem daemon**: `zeroshield watch` sem daemon roda o mesmo `FileWatcher`
+  no processo da CLI (modo local), com os mesmos eventos no terminal.
 
 ## IPS (zs-net)
 
@@ -144,6 +175,7 @@ SQLite (rusqlite com `bundled`), caminho `$ZS_DATA_DIR/zeroshield.db`
 | `scans`       | resumo de varreduras                                 |
 | `findings`    | achados individuais (path, hashes, score, detecções) |
 | `file_hashes` | cache de hashes (mtime + tamanho)                    |
+| `clean_files` | cache de arquivos limpos (path, tamanho, mtime, versão) |
 | `signatures`  | assinaturas de hash importadas/semeadas              |
 | `quarantine`  | entradas de quarentena (id, caminho original, modo)  |
 | `net_rules`   | regras de rede (ip/cidr/domain + origem)             |

@@ -1,0 +1,17 @@
+[package]
+name = "zs-watch"
+description = "ZeroShield real-time protection: inotify file watching and removable media detection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zs-core.workspace = true
+zs-scan.workspace = true
+inotify = { version = "0.11", default-features = false }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

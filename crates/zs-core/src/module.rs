@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     FileScan,
+    FileWatch,
+    DeviceScan,
     ProcessScan,
     NetworkAudit,
     NetworkFilter,
@@ -23,6 +25,8 @@ impl Capability {
     pub fn as_str(self) -> &'static str {
         match self {
             Capability::FileScan => "file-scan",
+            Capability::FileWatch => "file-watch",
+            Capability::DeviceScan => "device-scan",
             Capability::ProcessScan => "process-scan",
             Capability::NetworkAudit => "network-audit",
             Capability::NetworkFilter => "network-filter",

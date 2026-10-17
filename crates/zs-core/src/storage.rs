@@ -1,5 +1,5 @@
-//! SQLite backed storage: events, findings, scans, hash cache, signatures,
-//! quarantine metadata and network rules.
+//! SQLite backed storage: events, findings, scans, hash cache, clean-file
+//! cache, signatures, quarantine metadata and network rules.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -58,6 +58,17 @@ CREATE TABLE IF NOT EXISTS file_hashes (
     md5    TEXT NOT NULL,
     ts     INTEGER NOT NULL
 );
+
+-- Files that were fully scanned with no detections. `version` captures the
+-- signature/rules state, so a signature update invalidates every entry.
+CREATE TABLE IF NOT EXISTS clean_files (
+    path    TEXT PRIMARY KEY,
+    size    INTEGER NOT NULL,
+    mtime   INTEGER NOT NULL,
+    version TEXT NOT NULL,
+    ts      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_clean_files_ts ON clean_files(ts);
 
 CREATE TABLE IF NOT EXISTS signatures (
     hash        TEXT PRIMARY KEY,
@@ -123,9 +134,11 @@ impl Storage {
     fn from_conn(conn: Connection) -> ZsResult<Self> {
         conn.execute_batch(SCHEMA)
             .map_err(|e| ZsError::Storage(format!("schema migration failed: {e}")))?;
-        Ok(Self {
+        let storage = Self {
             conn: Mutex::new(conn),
-        })
+        };
+        storage.set_meta("schema_version", "2")?;
+        Ok(storage)
     }
 
     fn lock(&self) -> ZsResult<std::sync::MutexGuard<'_, Connection>> {
@@ -323,6 +336,94 @@ impl Storage {
         let conn = self.lock()?;
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM file_hashes", [], |r| r.get(0))?;
         Ok(n as u64)
+    }
+
+    // ---------------------------------------------------------- clean cache
+
+    /// Was `path` already fully scanned with no detections at this size/mtime
+    /// and under the given signature/rules version?
+    pub fn is_clean_file(
+        &self,
+        path: &str,
+        size: u64,
+        mtime: i64,
+        version: &str,
+    ) -> ZsResult<bool> {
+        let conn = self.lock()?;
+        let hit: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM clean_files
+                 WHERE path = ?1 AND size = ?2 AND mtime = ?3 AND version = ?4",
+                params![path, size as i64, mtime, version],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(hit.is_some())
+    }
+
+    /// Remember that `path` was scanned clean.
+    pub fn mark_clean_file(
+        &self,
+        path: &str,
+        size: u64,
+        mtime: i64,
+        version: &str,
+    ) -> ZsResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO clean_files (path, size, mtime, version, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(path) DO UPDATE SET
+                size = excluded.size, mtime = excluded.mtime,
+                version = excluded.version, ts = excluded.ts",
+            params![path, size as i64, mtime, version, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// Drop clean-file entries older than `ttl` seconds and enforce a maximum
+    /// entry count (oldest first). Returns the number of removed rows.
+    pub fn prune_clean_files(&self, ttl_secs: u64, max_entries: u64) -> ZsResult<u64> {
+        let conn = self.lock()?;
+        let cutoff = now_secs() - ttl_secs as i64;
+        let mut removed = conn.execute("DELETE FROM clean_files WHERE ts < ?1", params![cutoff])?;
+        if max_entries > 0 {
+            let n: i64 = conn.query_row("SELECT COUNT(*) FROM clean_files", [], |r| r.get(0))?;
+            if n as u64 > max_entries {
+                let excess = n as u64 - max_entries;
+                removed += conn.execute(
+                    "DELETE FROM clean_files WHERE path IN (
+                        SELECT path FROM clean_files ORDER BY ts ASC, rowid ASC LIMIT ?1
+                     )",
+                    params![excess as i64],
+                )?;
+            }
+        }
+        Ok(removed as u64)
+    }
+
+    pub fn clean_cache_len(&self) -> ZsResult<u64> {
+        let conn = self.lock()?;
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM clean_files", [], |r| r.get(0))?;
+        Ok(n as u64)
+    }
+
+    pub fn clear_clean_files(&self) -> ZsResult<u64> {
+        let conn = self.lock()?;
+        let n = conn.execute("DELETE FROM clean_files", [])?;
+        Ok(n as u64)
+    }
+
+    /// Fingerprint of the hash signature set (count + newest insertion time).
+    /// Any import changes it, invalidating the clean-file cache.
+    pub fn signature_fingerprint(&self) -> ZsResult<String> {
+        let conn = self.lock()?;
+        let (count, newest): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(MAX(ts), 0) FROM signatures",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(format!("{count}-{newest}"))
     }
 
     // ----------------------------------------------------------- signatures
@@ -619,6 +720,58 @@ mod tests {
         assert!(s.get_cached_hashes("/x", 10, 1000).unwrap().is_some());
         assert!(s.get_cached_hashes("/x", 10, 999).unwrap().is_none());
         assert!(s.get_cached_hashes("/x", 11, 1000).unwrap().is_none());
+    }
+
+    #[test]
+    fn clean_cache_matches_size_mtime_and_version() {
+        let s = store();
+        assert!(!s.is_clean_file("/x", 10, 1000, "v1").unwrap());
+        s.mark_clean_file("/x", 10, 1000, "v1").unwrap();
+        assert!(s.is_clean_file("/x", 10, 1000, "v1").unwrap());
+        assert!(!s.is_clean_file("/x", 10, 1000, "v2").unwrap());
+        assert!(!s.is_clean_file("/x", 10, 999, "v1").unwrap());
+        assert!(!s.is_clean_file("/x", 11, 1000, "v1").unwrap());
+        assert_eq!(s.clean_cache_len().unwrap(), 1);
+        // Re-marking the same path updates in place.
+        s.mark_clean_file("/x", 11, 1000, "v1").unwrap();
+        assert_eq!(s.clean_cache_len().unwrap(), 1);
+        assert!(s.is_clean_file("/x", 11, 1000, "v1").unwrap());
+        assert_eq!(s.clear_clean_files().unwrap(), 1);
+        assert_eq!(s.clean_cache_len().unwrap(), 0);
+    }
+
+    #[test]
+    fn clean_cache_prunes_by_ttl_and_max_entries() {
+        let s = store();
+        for i in 0..5 {
+            s.mark_clean_file(&format!("/f{i}"), 1, 1, "v1").unwrap();
+        }
+        // ttl of zero removes everything older than "now" (ts < now).
+        // Give the first entry an old timestamp explicitly.
+        {
+            let conn = s.lock().unwrap();
+            conn.execute("UPDATE clean_files SET ts = 1 WHERE path = '/f0'", [])
+                .unwrap();
+        }
+        assert_eq!(s.prune_clean_files(3600, 0).unwrap(), 1);
+        assert_eq!(s.clean_cache_len().unwrap(), 4);
+        // Max-entries enforcement drops the oldest rows.
+        assert_eq!(s.prune_clean_files(3600, 2).unwrap(), 2);
+        assert_eq!(s.clean_cache_len().unwrap(), 2);
+    }
+
+    #[test]
+    fn signature_fingerprint_changes_on_import() {
+        let s = store();
+        let before = s.signature_fingerprint().unwrap();
+        s.insert_signature("aa", "md5", "t", Severity::Low, "d", "test")
+            .unwrap();
+        let after = s.signature_fingerprint().unwrap();
+        assert_ne!(before, after);
+        // Re-importing the same hash does not change the fingerprint.
+        s.insert_signature("aa", "md5", "t", Severity::Low, "d", "test")
+            .unwrap();
+        assert_eq!(s.signature_fingerprint().unwrap(), after);
     }
 
     #[test]

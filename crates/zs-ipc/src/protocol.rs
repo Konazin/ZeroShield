@@ -27,6 +27,12 @@ pub mod methods {
     pub const SHUTDOWN: &str = "daemon.shutdown";
     /// Keeps the connection open and streams events (process alerts, ...).
     pub const WATCH: &str = "watch.start";
+    /// Start a real-time directory watch session (`watch.fs.start`).
+    pub const WATCH_FS_START: &str = "watch.fs.start";
+    /// Stop watch sessions (`watch.fs.stop`).
+    pub const WATCH_FS_STOP: &str = "watch.fs.stop";
+    /// List active watch sessions (`watch.fs.list`).
+    pub const WATCH_FS_LIST: &str = "watch.fs.list";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

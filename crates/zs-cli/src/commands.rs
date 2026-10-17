@@ -2,6 +2,8 @@
 //! available and falls back to in-process engines otherwise.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -16,6 +18,7 @@ use zs_core::util::{format_ts, human_bytes, human_duration, now_secs};
 use zs_ipc::protocol::methods;
 use zs_net::guard::{ApplyOutcome, AuditResult, FeedUpdateResult, NetStatus};
 use zs_scan::Progress;
+use zs_watch::{FileWatcher, WatchEvent, WatchOptions};
 
 use crate::local::Local;
 use crate::render::{print_table, truncate, Style};
@@ -113,6 +116,12 @@ fn print_scan_summary(style: &Style, report: &ScanReport) {
             report.files_skipped, report.errors
         );
     }
+    if report.cached > 0 {
+        println!(
+            "    {} files reused from the clean-file cache",
+            report.cached
+        );
+    }
 }
 
 // ------------------------------------------------------------------ status
@@ -151,6 +160,12 @@ pub async fn cmd_status(ctx: &Ctx) -> ZsResult<()> {
             "  quarantine  {} entries   net rules {}",
             value["quarantine_entries"], value["net_rules"]
         );
+        println!(
+            "  clean cache {} files   watch: {} session(s), {} dirs",
+            value["clean_cache_entries"],
+            value["watch_sessions"].as_u64().unwrap_or(0),
+            value["watched_dirs"].as_u64().unwrap_or(0),
+        );
         if let Some(modules) = value["modules"].as_array() {
             println!("  modules:");
             for m in modules {
@@ -186,6 +201,7 @@ pub async fn cmd_status(ctx: &Ctx) -> ZsResult<()> {
             "rules": local.scanner.rules().len(),
             "signatures": local.storage.signature_count()?,
             "quarantine_entries": local.quarantine.list()?.len(),
+            "clean_cache_entries": local.storage.clean_cache_len().unwrap_or(0),
             "modules": [
                 local.scanner.status().await,
                 local.procmon.status().await,
@@ -218,6 +234,10 @@ pub async fn cmd_status(ctx: &Ctx) -> ZsResult<()> {
         local.storage.threat_count()?,
         local.scanner.rules().len(),
         local.storage.signature_count()?
+    );
+    println!(
+        "  clean cache {} files",
+        local.storage.clean_cache_len().unwrap_or(0)
     );
     println!(
         "  netguard    mode={} rules={} nft={}",
@@ -299,6 +319,8 @@ pub async fn cmd_scan(ctx: &Ctx, targets: &[PathBuf], args: ScanArgs) -> ZsResul
         quarantine: args.quarantine || scfg.quarantine,
         content_scan: true,
         hash_cache: scfg.hash_cache,
+        clean_cache: scfg.clean_cache,
+        record: true,
     };
 
     let mut threats = false;
@@ -544,6 +566,274 @@ pub async fn cmd_proc_watch(ctx: &Ctx) -> ZsResult<()> {
             }
         }
     }
+}
+
+// ------------------------------------------------------- real-time watch
+
+pub struct WatchArgs {
+    pub paths: Vec<PathBuf>,
+    pub quarantine: bool,
+    pub recursive: bool,
+    pub detach: bool,
+    pub list: bool,
+    pub stop: bool,
+}
+
+pub async fn cmd_watch(ctx: &Ctx, args: WatchArgs) -> ZsResult<()> {
+    if args.list && args.stop {
+        return Err(ZsError::Config("use either --list or --stop".into()));
+    }
+    if args.list {
+        return cmd_watch_list(ctx).await;
+    }
+    if args.stop {
+        return cmd_watch_stop(ctx, &args.paths).await;
+    }
+
+    let paths: Vec<PathBuf> = if args.paths.is_empty() {
+        ctx.cfg.watch.paths.clone()
+    } else {
+        args.paths.clone()
+    };
+    if paths.is_empty() {
+        return Err(ZsError::Config(
+            "no directories given; pass paths or set watch.paths in the configuration".into(),
+        ));
+    }
+
+    match ctx.daemon().await {
+        Some(client) => cmd_watch_daemon(ctx, client, &paths, &args).await,
+        None => {
+            if args.detach {
+                return Err(ZsError::Ipc(
+                    "--detach requires a running daemon (start zeroshieldd)".into(),
+                ));
+            }
+            cmd_watch_local(ctx, &paths, &args).await
+        }
+    }
+}
+
+async fn cmd_watch_daemon(
+    ctx: &Ctx,
+    mut client: zs_ipc::Client,
+    paths: &[PathBuf],
+    args: &WatchArgs,
+) -> ZsResult<()> {
+    let params = json!({
+        "paths": paths,
+        "quarantine": args.quarantine || ctx.cfg.watch.quarantine,
+        "recursive": args.recursive && ctx.cfg.watch.recursive,
+        "debounce_ms": ctx.cfg.watch.debounce_ms,
+    });
+    let resp = client.call_simple(methods::WATCH_FS_START, params).await?;
+    let value = resp.into_result()?;
+
+    if args.detach {
+        if ctx.json {
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        } else {
+            println!(
+                "{} watching {} in the daemon (detached; stop with 'zeroshield watch --stop')",
+                ctx.style.bold("zeroshield:"),
+                paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        return Ok(());
+    }
+
+    // Keep this connection open: every daemon event is streamed to it.
+    let resp = client.call_simple(methods::WATCH, json!({})).await?;
+    resp.into_result()?;
+    println!(
+        "{} watching {} in real time (Ctrl+C to stop)",
+        ctx.style.bold("zeroshield:"),
+        paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    loop {
+        tokio::select! {
+            event = client.next_event(Some(Duration::from_secs(3600))) => {
+                match event {
+                    Ok(Some(event)) => print_live_event(ctx, &event),
+                    Ok(None) => {
+                        println!("daemon closed the connection");
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        break;
+                    }
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!();
+                break;
+            }
+        }
+    }
+
+    // Stop the session we started (the streaming connection may be gone, so
+    // use a fresh one).
+    if let Some(mut control) = ctx.daemon().await {
+        match control
+            .call_simple(methods::WATCH_FS_STOP, json!({ "paths": paths }))
+            .await
+        {
+            Ok(resp) => {
+                let _ = resp.into_result();
+                println!("{} watch session stopped", ctx.style.bold("zeroshield:"));
+            }
+            Err(e) => eprintln!("could not stop the watch session: {e}"),
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_watch_local(ctx: &Ctx, paths: &[PathBuf], args: &WatchArgs) -> ZsResult<()> {
+    let local = ctx.local()?;
+    let scanner = Arc::new(local.scanner);
+    let opts = WatchOptions {
+        recursive: args.recursive && ctx.cfg.watch.recursive,
+        quarantine: args.quarantine || ctx.cfg.watch.quarantine,
+        debounce: Duration::from_millis(ctx.cfg.watch.debounce_ms.min(60_000)),
+    };
+    let watcher = FileWatcher::new(scanner, opts);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let thread_paths = paths.to_vec();
+    let (tx, rx) = std::sync::mpsc::channel::<WatchEvent>();
+    let handle = std::thread::spawn(move || {
+        let mut emit = |ev: WatchEvent| {
+            let _ = tx.send(ev);
+        };
+        if let Err(e) = watcher.run(&thread_paths, &stop_thread, &mut emit) {
+            eprintln!("watch: {e}");
+        }
+    });
+
+    println!(
+        "{} daemon not reachable: watching locally in this process (Ctrl+C to stop)",
+        ctx.style.bold("zeroshield:")
+    );
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                println!();
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                while let Ok(ev) = rx.try_recv() {
+                    match ev {
+                        WatchEvent::Finding(finding) => {
+                            println!("{}", ctx.style.bold("real-time detection"));
+                            print_finding(&ctx.style, &finding);
+                        }
+                        WatchEvent::Error { path, message } => {
+                            eprintln!("{} {path}: {message}", ctx.style.yellow("watch error:"));
+                        }
+                        WatchEvent::Overflow => {
+                            eprintln!(
+                                "{} kernel event queue overflowed; some files were missed",
+                                ctx.style.yellow("watch:")
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = handle.join();
+    Ok(())
+}
+
+async fn cmd_watch_list(ctx: &Ctx) -> ZsResult<()> {
+    let Some(mut client) = ctx.daemon().await else {
+        return Err(ZsError::Ipc(
+            "--list requires a running daemon (sessions live in zeroshieldd)".into(),
+        ));
+    };
+    let resp = client
+        .call_simple(methods::WATCH_FS_LIST, json!({}))
+        .await?;
+    let value = resp.into_result()?;
+    if ctx.json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    let sessions = value["sessions"].as_array().cloned().unwrap_or_default();
+    if sessions.is_empty() {
+        println!("no active watch sessions");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = sessions
+        .iter()
+        .map(|s| {
+            let paths = s["paths"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|p| p.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            vec![
+                paths,
+                s["watched_dirs"].as_u64().unwrap_or(0).to_string(),
+                if s["quarantine"].as_bool().unwrap_or(false) {
+                    "yes".into()
+                } else {
+                    "no".into()
+                },
+                if s["recursive"].as_bool().unwrap_or(true) {
+                    "yes".into()
+                } else {
+                    "no".into()
+                },
+                format_ts(s["started_at"].as_i64().unwrap_or(0)),
+            ]
+        })
+        .collect();
+    print_table(
+        &ctx.style,
+        &["paths", "dirs", "quarantine", "recursive", "started"],
+        &rows,
+    );
+    Ok(())
+}
+
+async fn cmd_watch_stop(ctx: &Ctx, paths: &[PathBuf]) -> ZsResult<()> {
+    let Some(mut client) = ctx.daemon().await else {
+        return Err(ZsError::Ipc("--stop requires a running daemon".into()));
+    };
+    let params = if paths.is_empty() {
+        json!({})
+    } else {
+        json!({ "paths": paths })
+    };
+    let resp = client.call_simple(methods::WATCH_FS_STOP, params).await?;
+    let value = resp.into_result()?;
+    if ctx.json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    let stopped = value["stopped"].as_u64().unwrap_or(0);
+    if stopped == 0 {
+        println!("no watch session matched");
+    } else {
+        println!("{stopped} watch session(s) stopped");
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------- quarantine
@@ -1027,11 +1317,15 @@ pub async fn cmd_events(ctx: &Ctx, limit: u32, follow: bool) -> ZsResult<()> {
     Ok(())
 }
 
-/// One-line rendering for streamed (live) events.
+/// Semantic newline rendering for live events.
 fn print_live_event(ctx: &Ctx, event: &Event) {
     let style = &ctx.style;
     match event {
         Event::ScanFinding { finding, .. } => {
+            print_finding(style, finding);
+        }
+        Event::WatchFinding { finding } => {
+            println!("{}", style.bold("real-time detection"));
             print_finding(style, finding);
         }
         Event::ProcAlert { alert } => {
@@ -1067,11 +1361,25 @@ fn print_live_event(ctx: &Ctx, event: &Event) {
                     summary.files_scanned,
                     summary.verdict.as_str()
                 ),
+                Event::WatchStarted { paths } => {
+                    format!("real-time watch started: {}", paths.join(", "))
+                }
+                Event::WatchStopped { paths } => {
+                    format!("real-time watch stopped: {}", paths.join(", "))
+                }
+                Event::WatchError { path, message } => {
+                    format!("watch error on {path}: {message}")
+                }
+                Event::DeviceMounted {
+                    device, mountpoint, ..
+                } => format!("device mounted: {device} on {mountpoint}"),
                 Event::NetAlert { message, .. } => format!("net alert: {message}"),
                 Event::Info { message } => message.clone(),
                 Event::Warning { message } => format!("warning: {message}"),
                 Event::Error { message } => format!("error: {message}"),
-                Event::ScanFinding { .. } | Event::ProcAlert { .. } => unreachable!(),
+                Event::ScanFinding { .. }
+                | Event::WatchFinding { .. }
+                | Event::ProcAlert { .. } => unreachable!(),
             };
             println!(
                 "{} [{}] {}",

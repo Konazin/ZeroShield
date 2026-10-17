@@ -45,20 +45,29 @@ impl Module for Scanner {
             Some(s) => s.signature_count().unwrap_or(0),
             None => 0,
         };
+        let clean_cache = if self.config().clean_cache {
+            match &self.storage {
+                Some(s) => format!("clean cache {} entries", s.clean_cache_len().unwrap_or(0)),
+                None => "clean cache off".to_string(),
+            }
+        } else {
+            "clean cache off".to_string()
+        };
         ModuleStatus {
             name: self.name().to_string(),
             description: self.description().to_string(),
             capabilities: self.capabilities(),
             healthy: true,
             detail: format!(
-                "{} content rules, {} hash signatures, quarantine {}",
+                "{} content rules, {} hash signatures, quarantine {}, {}",
                 self.rules().len(),
                 signatures,
                 if self.quarantine.is_some() {
                     "enabled"
                 } else {
                     "disabled"
-                }
+                },
+                clean_cache
             ),
         }
     }

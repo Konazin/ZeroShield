@@ -21,6 +21,8 @@ pub struct Config {
     pub scanner: ScannerConfig,
     pub procmon: ProcMonConfig,
     pub netguard: NetGuardConfig,
+    pub watch: WatchConfig,
+    pub automount: AutomountConfig,
     pub storage: StorageConfig,
 }
 
@@ -54,6 +56,11 @@ pub struct ScannerConfig {
     /// Automatically quarantine malicious files found during a scan.
     pub quarantine: bool,
     pub hash_cache: bool,
+    /// Reuse the verdict of files already scanned clean (unchanged size/mtime
+    /// and same signature/rules version) without reading them again.
+    pub clean_cache: bool,
+    /// Upper bound for the clean-file cache (oldest entries are pruned).
+    pub clean_cache_max_entries: u64,
     /// How long a clean file may stay in the hash cache (seconds).
     pub clean_cache_ttl_secs: u64,
     /// Maximum number of bytes inspected for content rules per file.
@@ -73,6 +80,8 @@ impl Default for ScannerConfig {
             min_report_score: 20,
             quarantine: false,
             hash_cache: true,
+            clean_cache: true,
+            clean_cache_max_entries: 200_000,
             clean_cache_ttl_secs: 7 * 24 * 3600,
             content_scan_max_bytes: 16 * 1024 * 1024,
             rule_dirs: vec![PathBuf::from("/usr/share/zeroshield/rules")],
@@ -100,6 +109,62 @@ impl Default for ProcMonConfig {
             poll_interval_secs: 5,
             alert_score: 40,
             report_all_new: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WatchConfig {
+    /// Start watchers for `paths` automatically when the daemon boots.
+    pub enabled: bool,
+    /// Directories monitored in real time (new and changed files).
+    pub paths: Vec<PathBuf>,
+    /// Quarantine malicious files detected by the watcher.
+    pub quarantine: bool,
+    /// Watch subdirectories as well.
+    pub recursive: bool,
+    /// Wait this long after the last write before scanning a file, so that
+    /// partially written files are not scanned mid-copy.
+    pub debounce_ms: u64,
+}
+
+impl Default for WatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            paths: Vec::new(),
+            quarantine: false,
+            recursive: true,
+            debounce_ms: 800,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutomountConfig {
+    /// Scan removable media automatically when it is mounted.
+    pub enabled: bool,
+    /// Poll interval for `/proc/mounts` (seconds).
+    pub poll_interval_secs: u64,
+    /// Mount points below these prefixes are treated as removable media.
+    pub roots: Vec<PathBuf>,
+    /// Quarantine malicious files found on mounted media.
+    pub quarantine: bool,
+}
+
+impl Default for AutomountConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: 5,
+            roots: vec![
+                PathBuf::from("/media"),
+                PathBuf::from("/run/media"),
+                PathBuf::from("/mnt"),
+            ],
+            quarantine: false,
         }
     }
 }
@@ -212,6 +277,29 @@ impl Config {
         if self.scanner.max_file_size == 0 {
             return Err(ZsError::Config("scanner.max_file_size must be > 0".into()));
         }
+        if self.scanner.clean_cache_max_entries == 0 {
+            return Err(ZsError::Config(
+                "scanner.clean_cache_max_entries must be > 0".into(),
+            ));
+        }
+        if self.watch.debounce_ms > 60_000 {
+            return Err(ZsError::Config("watch.debounce_ms must be <= 60000".into()));
+        }
+        if self.watch.enabled && self.watch.paths.is_empty() {
+            return Err(ZsError::Config(
+                "watch.paths must not be empty when watch.enabled = true".into(),
+            ));
+        }
+        if self.automount.enabled && self.automount.roots.is_empty() {
+            return Err(ZsError::Config(
+                "automount.roots must not be empty when automount.enabled = true".into(),
+            ));
+        }
+        if self.automount.poll_interval_secs == 0 {
+            return Err(ZsError::Config(
+                "automount.poll_interval_secs must be > 0".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -240,14 +328,51 @@ recursive = false
 [netguard]
 mode = "block"
 dns_mode = "dnsmasq"
+
+[watch]
+enabled = true
+paths = ["/home", "/tmp"]
+quarantine = true
+debounce_ms = 1500
+
+[automount]
+enabled = true
+poll_interval_secs = 10
+roots = ["/media"]
 "#;
         let cfg: Config = toml::from_str(text).unwrap();
         assert_eq!(cfg.scanner.min_report_score, 50);
         assert!(!cfg.scanner.recursive);
         assert_eq!(cfg.netguard.mode, NetMode::Block);
         assert_eq!(cfg.netguard.dns_mode, DnsMode::Dnsmasq);
+        assert!(cfg.watch.enabled);
+        assert_eq!(cfg.watch.paths.len(), 2);
+        assert!(cfg.watch.quarantine);
+        assert_eq!(cfg.watch.debounce_ms, 1500);
+        assert!(cfg.watch.recursive, "untouched keys keep defaults");
+        assert!(cfg.automount.enabled);
+        assert_eq!(cfg.automount.poll_interval_secs, 10);
         // untouched sections keep defaults
         assert_eq!(cfg.procmon.poll_interval_secs, 5);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn watch_enabled_requires_paths() {
+        let text = r#"
+[watch]
+enabled = true
+"#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn automount_enabled_requires_roots() {
+        let mut cfg = Config::default();
+        cfg.automount.enabled = true;
+        cfg.automount.roots.clear();
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

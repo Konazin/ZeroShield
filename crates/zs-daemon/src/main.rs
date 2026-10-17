@@ -5,6 +5,7 @@
 
 mod handler;
 mod logging;
+mod watch;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -14,6 +15,7 @@ use tokio::sync::Notify;
 
 use zs_core::config::Config;
 use zs_core::error::{ZsError, ZsResult};
+use zs_core::event::Event;
 use zs_core::paths::Paths;
 use zs_core::storage::Storage;
 use zs_core::util::{is_root, now_secs};
@@ -22,6 +24,7 @@ use zs_ipc::Server;
 use zs_net::NetGuard;
 use zs_proc::ProcMonitor;
 use zs_scan::{Quarantine, Scanner};
+use zs_watch::mounts::MountWatcher;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -100,6 +103,16 @@ async fn async_main(paths: Paths, cfg: Config, cfg_path: Option<PathBuf>) -> ZsR
             tracing::info!("pruned {removed} stale hash cache entries");
         }
     }
+    match storage.prune_clean_files(
+        cfg.scanner.clean_cache_ttl_secs,
+        cfg.scanner.clean_cache_max_entries,
+    ) {
+        Ok(removed) if removed > 0 => {
+            tracing::info!("pruned {removed} stale clean-file cache entries");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("cannot prune clean-file cache: {e}"),
+    }
 
     let quarantine = Arc::new(Quarantine::new(paths.quarantine_dir(), storage.clone())?);
     let scanner = Arc::new(Scanner::new(
@@ -118,6 +131,11 @@ async fn async_main(paths: Paths, cfg: Config, cfg_path: Option<PathBuf>) -> ZsR
     let socket_path = paths.socket_path();
     let shutdown = Arc::new(Notify::new());
     let (events_tx, _) = tokio::sync::broadcast::channel::<zs_core::event::Event>(512);
+    let watches = Arc::new(watch::WatchManager::new(
+        scanner.clone(),
+        storage.clone(),
+        events_tx.clone(),
+    ));
     let state = Arc::new(handler::State {
         version: zs_core::VERSION.to_string(),
         started_at: now_secs(),
@@ -129,6 +147,8 @@ async fn async_main(paths: Paths, cfg: Config, cfg_path: Option<PathBuf>) -> ZsR
         quarantine: quarantine.clone(),
         procmon: procmon.clone(),
         netguard: netguard.clone(),
+        watches: watches.clone(),
+        watch_cfg: cfg.watch.clone(),
         shutdown: shutdown.clone(),
         events: events_tx.clone(),
     });
@@ -194,6 +214,94 @@ async fn async_main(paths: Paths, cfg: Config, cfg_path: Option<PathBuf>) -> ZsR
         tracing::info!("process watcher disabled by configuration");
     }
 
+    // Configured real-time watch sessions (M7).
+    if cfg.watch.enabled {
+        if cfg.watch.paths.is_empty() {
+            tracing::warn!("watch.enabled is true but watch.paths is empty");
+        } else {
+            match watches.start(
+                cfg.watch.paths.clone(),
+                cfg.watch.quarantine,
+                cfg.watch.recursive,
+                std::time::Duration::from_millis(cfg.watch.debounce_ms),
+            ) {
+                Ok(info) => tracing::info!(
+                    "watching {} in real time{}",
+                    info.paths.join(", "),
+                    if info.quarantine {
+                        " (quarantine enabled)"
+                    } else {
+                        ""
+                    }
+                ),
+                Err(e) => tracing::warn!("cannot start configured watch session: {e}"),
+            }
+        }
+    } else {
+        tracing::info!("real-time file watching disabled by configuration");
+    }
+
+    // Removable media scanning (M7): poll /proc/mounts for new mounts below
+    // the configured roots and scan them in the background.
+    if cfg.automount.enabled {
+        let state = state.clone();
+        let events = events.clone();
+        let storage = storage.clone();
+        let interval_secs = cfg.automount.poll_interval_secs.clamp(1, 3600);
+        let quarantine = cfg.automount.quarantine;
+        let roots = cfg.automount.roots.clone();
+        tokio::spawn(async move {
+            let mut mounts = MountWatcher::new(roots);
+            mounts.prime();
+            tracing::info!(
+                "automount watcher armed ({} mount(s) visible, polling every {interval_secs}s)",
+                mounts.visible_count()
+            );
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            tick.tick().await; // consume the immediate first tick
+            loop {
+                tick.tick().await;
+                for mount in mounts.poll() {
+                    tracing::warn!(
+                        "removable media mounted: {} on {} ({})",
+                        mount.device,
+                        mount.mountpoint.display(),
+                        mount.fstype
+                    );
+                    let event = Event::DeviceMounted {
+                        device: mount.device.clone(),
+                        mountpoint: mount.mountpoint.display().to_string(),
+                        fstype: mount.fstype.clone(),
+                    };
+                    let _ = storage.record_event(
+                        event.kind(),
+                        event.severity(),
+                        &serde_json::to_value(&event).unwrap_or(serde_json::Value::Null),
+                    );
+                    let _ = events.send(event);
+
+                    let scanner = state.scanner.clone();
+                    let storage = storage.clone();
+                    let events = events.clone();
+                    let mount_for_task = mount.clone();
+                    let min_report_score = state.scanner.config().min_report_score;
+                    tokio::task::spawn_blocking(move || {
+                        watch::scan_mount(
+                            &scanner,
+                            &storage,
+                            &events,
+                            &mount_for_task,
+                            quarantine,
+                            min_report_score,
+                        );
+                    });
+                }
+            }
+        });
+    } else {
+        tracing::info!("removable media scanning disabled by configuration");
+    }
+
     // Shutdown on SIGINT/SIGTERM or daemon.shutdown request.
     let shutdown_signal = {
         let notify = shutdown.clone();
@@ -221,6 +329,11 @@ async fn async_main(paths: Paths, cfg: Config, cfg_path: Option<PathBuf>) -> ZsR
         result = server.run(shutdown_signal) => {
             result?;
         }
+    }
+
+    let stopped = watches.stop_all();
+    if stopped > 0 {
+        tracing::info!("stopped {stopped} watch session(s)");
     }
 
     let _ = events.send(zs_core::event::Event::DaemonStopping);

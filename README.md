@@ -121,6 +121,12 @@ zeroshield quarantine purge 1
 zeroshield proc list --min-score 40
 zeroshield proc watch                                # ao vivo (stream de eventos)
 
+# tempo real (inotify)
+zeroshield watch ~/Downloads                         # acompanha e escaneia ao vivo
+zeroshield watch ~/Downloads -q --detach             # sessão no daemon + quarentena
+zeroshield watch --list                              # sessões ativas
+zeroshield watch --stop                              # encerra as sessões
+
 # IPS (modo audit por padrão)
 zeroshield net status
 zeroshield net audit 203.0.113.7 malware.example
@@ -153,6 +159,17 @@ Ordem de busca: `$ZS_CONFIG` → `/etc/zeroshield/config.toml` →
 [scanner]
 quarantine = false        # quarentena automática no scan
 min_report_score = 20     # score mínimo para reportar
+clean_cache = true        # reusa veredito de arquivos já escaneados limpos
+
+[watch]
+enabled = false           # tempo real via inotify
+paths = ["/home", "/tmp"]
+quarantine = false
+debounce_ms = 800
+
+[automount]
+enabled = false           # escaneia mídia removível ao montar
+roots = ["/media", "/run/media", "/mnt"]
 
 [procmon]
 enabled = true
@@ -219,9 +236,9 @@ python3 -m unittest discover -s python/tests
 ```
 
 O workspace separa o núcleo em crates (`zs-core`, `zs-ipc`, `zs-scan`,
-`zs-proc`, `zs-net`, `zs-cli`, `zs-daemon`, `zs-gui`), com testes unitários em
-cada um. A CI roda fmt, clippy, testes no Debian (trixie) e Arch, build da GUI
-com GTK4 e os testes do SDK Python — veja
+`zs-watch`, `zs-proc`, `zs-net`, `zs-cli`, `zs-daemon`, `zs-gui`), com testes
+unitários em cada um. A CI roda fmt, clippy, testes no Debian (trixie) e Arch,
+build da GUI com GTK4 e os testes do SDK Python — veja
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ## Roadmap
@@ -233,7 +250,8 @@ com GTK4 e os testes do SDK Python — veja
 - [x] **M4** IPS (feeds, nftables, DNS; validação real em VM pendente)
 - [x] **M5** GUI GTK4 (código pronto; compilação validada só com GTK4)
 - [x] **M6** Empacotamento (deb via nfpm, PKGBUILD, systemd, CI)
-- [ ] **M7** Tempo real (inotify/fanotify) e cache "arquivos limpos"
+- [x] **M7** Tempo real (inotify, cache de arquivos limpos, scan de mídia
+      removível; validação com USB real pendente)
 - [ ] **M8** TUI + relatórios
 - [ ] **M9** Hardening, polkit, eBPF e v1.0
 

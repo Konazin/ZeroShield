@@ -158,6 +158,33 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(events[1]["type"], "scan_finished")
         daemon.join(timeout=5)
 
+    def test_watch_fs_start_stop_list(self) -> None:
+        seen = []
+
+        def responder(request):
+            seen.append((request["method"], request["params"]))
+            return [
+                {
+                    "id": request["id"],
+                    "ok": True,
+                    "result": {"session": {"paths": ["/tmp/w"]}, "sessions": []},
+                }
+            ]
+
+        path, daemon = self._serve([responder, responder, responder])
+        with Client(path=path) as client:
+            client.watch_fs_start(["/tmp/w"], quarantine=True, debounce_ms=500)
+            client.watch_fs_list()
+            client.watch_fs_stop(["/tmp/w"])
+        self.assertEqual(seen[0][0], "watch.fs.start")
+        self.assertEqual(seen[0][1]["paths"], ["/tmp/w"])
+        self.assertTrue(seen[0][1]["quarantine"])
+        self.assertEqual(seen[0][1]["debounce_ms"], 500)
+        self.assertEqual(seen[1][0], "watch.fs.list")
+        self.assertEqual(seen[2][0], "watch.fs.stop")
+        self.assertEqual(seen[2][1]["paths"], ["/tmp/w"])
+        daemon.join(timeout=5)
+
     def test_unreachable_socket_raises(self) -> None:
         client = Client(path="/tmp/zeroshield-does-not-exist.sock")
         with self.assertRaises(DaemonUnavailable):

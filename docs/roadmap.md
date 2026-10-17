@@ -31,7 +31,6 @@ falta.
 - [x] Pipeline com exclusões, limites de tamanho e progresso
 - [x] Quarentena modo `000` + listar/restaurar/purgar
 - [x] EICAR detectado por hash, regra e builtin (conteúdo montado em runtime)
-- [ ] Cache de "arquivos limpos" por versão de assinatura (M7)
 - [ ] Descompactação (zip/tar) para escanear conteúdo interno
 
 ## M3 — Monitor de processos ✅ (polling)
@@ -77,11 +76,22 @@ falta.
 - [ ] Repositório APT/AUR oficiais
 - [ ] `man` pages
 
-## M7 — Tempo real
+## M7 — Tempo real ✅ (código) / pendente de validação
 
-- [ ] inotify/fanotify em diretórios selecionados (`zeroshield watch`)
-- [ ] Cache persistente de arquivos limpos por versão de assinatura
-- [ ] Gatilho de scan em montagem de USB (`udev`/udisks)
+- [x] inotify em diretórios selecionados (`zeroshield watch`), com debounce,
+      subdiretórios recursivos, rebase em renomeação de diretórios e
+      relatório de overflow
+- [x] Sessões no daemon (`watch.fs.start|stop|list`), auto-start por
+      configuração e modo local sem daemon
+- [x] Cache persistente de arquivos limpos por versão de assinatura
+      (`sig+rules+opções`), invalidado por import de assinaturas ou edição
+      de regras
+- [x] Gatilho de scan em montagem de USB: o daemon observa `/proc/mounts`
+      sob raízes configuráveis e escaneia montagens novas
+      (substitui `udev`/udisks por portabilidade Debian+Arch; validar com
+      dispositivo real)
+- [ ] Validação em máquina com USB real / montagem FUSE
+- [ ] fanotify (precisa de `CAP_SYS_ADMIN`; inotify cobre o caso comum)
 
 ## M8 — TUI e relatórios
 

@@ -43,16 +43,22 @@ struct Stats {
     scan_id: String,
     files: u64,
     bytes: u64,
+    cached: u64,
     skipped: u64,
     errors: u64,
     findings: Vec<Finding>,
     max_score: u32,
+    /// Clean-file cache generation for this scan (None when disabled).
+    cache_version: Option<String>,
 }
 
 pub struct Scanner {
     cfg: ScannerConfig,
     pub(crate) storage: Option<Arc<Storage>>,
     rules: RuleSet,
+    /// Fingerprint of `rules`, combined with the signature fingerprint to
+    /// invalidate the clean-file cache when detections change.
+    rules_fingerprint: String,
     pub(crate) quarantine: Option<Arc<Quarantine>>,
 }
 
@@ -70,12 +76,36 @@ impl Scanner {
                 Err(e) => tracing::warn!("failed to load rules from {}: {e}", dir.display()),
             }
         }
+        let rules_fingerprint = rules.fingerprint();
         Ok(Self {
             cfg,
             storage,
             rules,
+            rules_fingerprint,
             quarantine,
         })
+    }
+
+    /// Clean-file cache generation for a given set of scan options. Combines
+    /// the signature-set fingerprint, the rules fingerprint and the depth of
+    /// the scan, so any change makes every cached verdict stale.
+    fn cache_version_for(&self, opts: &ScanOptions) -> Option<String> {
+        if !opts.clean_cache {
+            return None;
+        }
+        let storage = self.storage.as_ref()?;
+        match storage.signature_fingerprint() {
+            Ok(sig) => Some(format!(
+                "{sig}:{}:cs{}:cm{}",
+                self.rules_fingerprint,
+                if opts.content_scan { 1 } else { 0 },
+                self.cfg.content_scan_max_bytes
+            )),
+            Err(e) => {
+                tracing::warn!("cannot compute signature fingerprint: {e}");
+                None
+            }
+        }
     }
 
     pub fn rules(&self) -> &RuleSet {
@@ -111,10 +141,12 @@ impl Scanner {
             scan_id: scan_id.to_string(),
             files: 0,
             bytes: 0,
+            cached: 0,
             skipped: 0,
             errors: 0,
             findings: Vec::new(),
             max_score: 0,
+            cache_version: self.cache_version_for(opts),
         };
 
         let meta = std::fs::metadata(target).map_err(|e| ZsError::io(target, e))?;
@@ -143,19 +175,22 @@ impl Scanner {
             max_score: stats.max_score,
             verdict,
             findings: stats.findings,
+            cached: stats.cached,
         };
 
-        if let Some(storage) = &self.storage {
-            if let Err(e) = storage.record_scan(
-                &report.scan_id,
-                &report.target,
-                report.files_scanned,
-                report.bytes_scanned,
-                report.findings.len() as u64,
-                report.max_score,
-                report.duration_ms,
-            ) {
-                tracing::warn!("failed to record scan: {e}");
+        if opts.record {
+            if let Some(storage) = &self.storage {
+                if let Err(e) = storage.record_scan(
+                    &report.scan_id,
+                    &report.target,
+                    report.files_scanned,
+                    report.bytes_scanned,
+                    report.findings.len() as u64,
+                    report.max_score,
+                    report.duration_ms,
+                ) {
+                    tracing::warn!("failed to record scan: {e}");
+                }
             }
         }
         Ok(report)
@@ -293,6 +328,27 @@ impl Scanner {
         let path_str = path.display().to_string();
         let mtime = meta.mtime();
 
+        // Clean-file cache: same path/size/mtime under the same signature and
+        // rules version means the file was already fully scanned clean.
+        if let (Some(version), Some(storage)) = (&stats.cache_version, &self.storage) {
+            match storage.is_clean_file(&path_str, size_u64, mtime, version) {
+                Ok(true) => {
+                    stats.files += 1;
+                    stats.cached += 1;
+                    if stats.files <= PROGRESS_ALWAYS || stats.files % PROGRESS_EVERY == 0 {
+                        progress(Progress::File {
+                            path: path_str,
+                            files: stats.files,
+                            bytes: stats.bytes,
+                        });
+                    }
+                    return;
+                }
+                Ok(false) => {}
+                Err(e) => tracing::debug!("clean cache lookup failed for {path_str}: {e}"),
+            }
+        }
+
         // Hashes: from cache when possible.
         let cached = if opts.hash_cache {
             self.storage.as_ref().and_then(|s| {
@@ -342,6 +398,7 @@ impl Scanner {
 
         // 2. Content rules + ELF heuristics.
         let mut content_buf: Option<Vec<u8>> = None;
+        let mut fully_read = true;
         if opts.content_scan && size_u64 <= self.cfg.content_scan_max_bytes {
             match std::fs::read(path) {
                 Ok(buf) => {
@@ -351,6 +408,7 @@ impl Scanner {
                 }
                 Err(e) => {
                     stats.errors += 1;
+                    fully_read = false;
                     tracing::debug!("cannot read {path_str}: {e}");
                 }
             }
@@ -399,6 +457,13 @@ impl Scanner {
             stats.max_score = stats.max_score.max(score);
             stats.findings.push(finding.clone());
             progress(Progress::Finding(finding));
+        } else if score == 0 && fully_read {
+            // Fully inspected with no signal at all: remember the verdict.
+            if let (Some(version), Some(storage)) = (&stats.cache_version, &self.storage) {
+                if let Err(e) = storage.mark_clean_file(&path_str, size_u64, mtime, version) {
+                    tracing::debug!("cannot cache clean file {path_str}: {e}");
+                }
+            }
         }
 
         if stats.files <= PROGRESS_ALWAYS || stats.files % PROGRESS_EVERY == 0 {
@@ -550,5 +615,111 @@ mod tests {
             .scan(&f, &ScanOptions::default(), &mut |_| {})
             .unwrap();
         assert_eq!(storage.hash_cache_len().unwrap(), 1);
+    }
+
+    #[test]
+    fn clean_cache_skips_unchanged_files() {
+        let (dir, scanner) = scanner();
+        let f = dir.path().join("stable.txt");
+        std::fs::write(&f, b"stable content").unwrap();
+
+        let r1 = scanner
+            .scan(dir.path(), &ScanOptions::default(), &mut |_| {})
+            .unwrap();
+        assert_eq!(r1.cached, 0);
+        assert_eq!(r1.files_scanned, 1);
+        let storage = scanner.storage.as_ref().unwrap();
+        assert_eq!(storage.clean_cache_len().unwrap(), 1);
+
+        // Untouched file: verdict comes from the cache, nothing is read.
+        let r2 = scanner
+            .scan(dir.path(), &ScanOptions::default(), &mut |_| {})
+            .unwrap();
+        assert_eq!(r2.cached, 1);
+        assert_eq!(r2.files_scanned, 1);
+        assert_eq!(r2.bytes_scanned, 0);
+
+        // Modified file: size changed, so it is scanned again.
+        std::fs::write(&f, b"stable content!").unwrap();
+        let r3 = scanner
+            .scan(dir.path(), &ScanOptions::default(), &mut |_| {})
+            .unwrap();
+        assert_eq!(r3.cached, 0);
+        assert!(r3.bytes_scanned > 0);
+    }
+
+    #[test]
+    fn clean_cache_invalidated_by_signature_import() {
+        let (dir, scanner) = scanner();
+        std::fs::write(dir.path().join("benign.txt"), b"benign").unwrap();
+        scanner
+            .scan(dir.path(), &ScanOptions::default(), &mut |_| {})
+            .unwrap();
+
+        let r2 = scanner
+            .scan(dir.path(), &ScanOptions::default(), &mut |_| {})
+            .unwrap();
+        assert_eq!(r2.cached, 1);
+
+        // A new signature changes the fingerprint: cached verdicts are stale.
+        let storage = scanner.storage.as_ref().unwrap();
+        storage
+            .insert_signature("ff00", "md5", "test", Severity::Low, "d", "test")
+            .unwrap();
+        let r3 = scanner
+            .scan(dir.path(), &ScanOptions::default(), &mut |_| {})
+            .unwrap();
+        assert_eq!(r3.cached, 0);
+    }
+
+    #[test]
+    fn clean_cache_can_be_disabled() {
+        let (dir, scanner) = scanner();
+        std::fs::write(dir.path().join("plain.txt"), b"data").unwrap();
+        let opts = ScanOptions {
+            clean_cache: false,
+            ..Default::default()
+        };
+        scanner.scan(dir.path(), &opts, &mut |_| {}).unwrap();
+        let r2 = scanner.scan(dir.path(), &opts, &mut |_| {}).unwrap();
+        assert_eq!(r2.cached, 0);
+        assert_eq!(
+            scanner.storage.as_ref().unwrap().clean_cache_len().unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn malicious_files_are_never_cached() {
+        let (dir, scanner) = scanner();
+        std::fs::write(
+            dir.path().join("eicar4.com"),
+            crate::builtins::eicar_bytes(),
+        )
+        .unwrap();
+        scanner
+            .scan(dir.path(), &ScanOptions::default(), &mut |_| {})
+            .unwrap();
+        let r2 = scanner
+            .scan(dir.path(), &ScanOptions::default(), &mut |_| {})
+            .unwrap();
+        assert_eq!(r2.cached, 0);
+        assert_eq!(r2.verdict, Verdict::Malicious);
+        assert_eq!(
+            scanner.storage.as_ref().unwrap().clean_cache_len().unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn record_false_skips_scan_history() {
+        let (dir, scanner) = scanner();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        let opts = ScanOptions {
+            record: false,
+            ..Default::default()
+        };
+        scanner.scan(dir.path(), &opts, &mut |_| {}).unwrap();
+        assert_eq!(scanner.storage.as_ref().unwrap().scan_count().unwrap(), 0);
     }
 }

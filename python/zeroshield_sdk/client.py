@@ -168,3 +168,31 @@ class Client:
 
     def net_audit(self, targets: list) -> Dict[str, Any]:
         return self.call("net.audit", {"targets": targets})
+
+    def watch_fs_start(
+        self,
+        paths: list,
+        quarantine: bool = False,
+        recursive: bool = True,
+        debounce_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Start a real-time watch session (inotify) in the daemon."""
+        params: Dict[str, Any] = {
+            "paths": paths,
+            "quarantine": quarantine,
+            "recursive": recursive,
+        }
+        if debounce_ms is not None:
+            params["debounce_ms"] = debounce_ms
+        return self.call("watch.fs.start", params)
+
+    def watch_fs_stop(self, paths: Optional[list] = None) -> Dict[str, Any]:
+        """Stop watch sessions: every session, or only those covering ``paths``."""
+        params: Dict[str, Any] = {}
+        if paths:
+            params["paths"] = paths
+        return self.call("watch.fs.stop", params)
+
+    def watch_fs_list(self) -> Dict[str, Any]:
+        """List active real-time watch sessions."""
+        return self.call("watch.fs.list")
