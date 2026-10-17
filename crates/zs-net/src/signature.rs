@@ -76,11 +76,14 @@ pub(crate) mod testutil {
                 .map(|out| out.status.success())
                 .unwrap_or(false)
         };
-        let ok = has("gpg") && has("gpgv");
+        let gpg_ok = has("gpg");
+        let gpgv_ok = has("gpgv");
+        let ok = gpg_ok && gpgv_ok;
         if !ok {
             assert!(
                 std::env::var_os("ZS_REQUIRE_GPG").is_none(),
-                "gpg/gpgv not found but ZS_REQUIRE_GPG is set (install gnupg)"
+                "gpg/gpgv not found (gpg: {gpg_ok}, gpgv: {gpgv_ok}) but ZS_REQUIRE_GPG is set \
+                 (install gnupg; on Debian gpgv is a separate package)"
             );
             eprintln!("skipping GPG-dependent test: gpg/gpgv not installed");
         }
