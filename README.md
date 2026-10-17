@@ -209,6 +209,12 @@ feed_signature_required = false  # true = só ingere feed com assinatura GPG vá
 feed_keyring = "/etc/zeroshield/feeds.gpg"
 blocklist = ["198.51.100.0/24", "malware.example"]
 allowlist = ["trusted.example"]
+
+[daemon]
+client_uids = []          # uids confiados (sem polkit); root e o dono do daemon já são
+client_gids = []          # gids confiados (grupo primário ou suplementar)
+polkit_enabled = true     # usuários fora das listas são checados via polkit (pkcheck)
+# socket_mode = "0666"    # permite conexão de outros usuários locais (cada request é autorizado)
 ```
 
 Variáveis de ambiente úteis: `ZS_CONFIG`, `ZS_DATA_DIR`, `ZS_SOCKET`,
@@ -227,6 +233,15 @@ Variáveis de ambiente úteis: `ZS_CONFIG`, `ZS_DATA_DIR`, `ZS_SOCKET`,
 
 - O daemon roda como **root** (necessário para ler `/proc` de todos e chamar
   `nft`); a CLI/GUI rodam **sem privilégio** e só conversam pelo socket.
+- A identidade de quem conecta vem do **kernel** (`SO_PEERCRED`: uid/gid/pid),
+  nunca de dados do cliente. Além de root e do usuário do daemon, valem
+  `daemon.client_uids`/`client_gids`; os demais usuários passam por **polkit**
+  por requisição (`org.zeroshield.read` para leitura, `org.zeroshield.manage`
+  para mudanças), via helper `pkcheck` com subject `pid,start_time,uid` — sem
+  polkit disponível, a requisição é negada (fail-closed). O socket é `0660`
+  por padrão; clientes não-root exigem `daemon.socket_mode = "0666"` + a
+  política `/usr/share/polkit-1/actions/org.zeroshield.policy` (instalada
+  pelos pacotes).
 - O IPS **nunca** liga sozinho: `enabled = false`, `mode = "audit"` e a
   aplicação real exige root **e** `--yes`.
 - Quarentena deixa o arquivo com modo `000` e o restaura/metadata são

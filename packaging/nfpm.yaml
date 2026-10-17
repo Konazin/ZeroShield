@@ -52,6 +52,11 @@ contents:
   - src: packaging/tmpfiles/zeroshield.conf
     dst: /usr/lib/tmpfiles.d/zeroshield.conf
 
+  - src: packaging/polkit/org.zeroshield.policy
+    dst: /usr/share/polkit-1/actions/org.zeroshield.policy
+    file_info:
+      mode: 0644
+
   - src: packaging/config.toml
     dst: /etc/zeroshield/config.toml
     type: config|noreplace

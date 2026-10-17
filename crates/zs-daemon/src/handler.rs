@@ -14,11 +14,12 @@ use zs_core::model::{ScanOptions, Severity};
 use zs_core::storage::Storage;
 use zs_core::util::{human_bytes, now_secs};
 use zs_ipc::protocol::{methods, Response};
-use zs_ipc::{EventEnvelope, Frame, FrameTx, Handler, Request};
+use zs_ipc::{EventEnvelope, Frame, FrameTx, Handler, PeerCred, Request};
 use zs_net::NetGuard;
 use zs_proc::ProcMonitor;
 use zs_scan::{Progress, Quarantine, Scanner};
 
+use crate::auth::AuthPolicy;
 use crate::watch::WatchManager;
 
 pub struct State {
@@ -38,13 +39,34 @@ pub struct State {
     pub shutdown: Arc<Notify>,
     /// Daemon-wide event bus: everything sent here reaches watching clients.
     pub events: broadcast::Sender<Event>,
+    /// Peer-credentials + polkit authorization for every request (M9-C).
+    pub auth: Arc<AuthPolicy>,
 }
 
 pub fn build(state: Arc<State>) -> Handler {
-    Arc::new(move |req: Request, tx: FrameTx| {
+    Arc::new(move |req: Request, tx: FrameTx, cred: PeerCred| {
         let state = state.clone();
         Box::pin(async move {
             let id = req.id;
+            // Authorization may fork the polkit helper, so it runs on the
+            // blocking pool to keep the async workers free.
+            let auth = state.auth.clone();
+            let method = req.method.clone();
+            let decision =
+                match tokio::task::spawn_blocking(move || auth.authorize(&cred, &method)).await {
+                    Ok(decision) => decision,
+                    Err(e) => Err(ZsError::Ipc(format!("authorization task failed: {e}"))),
+                };
+            if let Err(e) = decision {
+                tracing::warn!(
+                    "request denied: method={} uid={} gid={} pid={}: {e}",
+                    req.method,
+                    cred.uid,
+                    cred.gid,
+                    cred.pid
+                );
+                return Response::err(id, e.to_string());
+            }
             match dispatch(state, &req.method, req.params, tx).await {
                 Ok(value) => Response::ok(id, value),
                 Err(e) => Response::err(id, e.to_string()),

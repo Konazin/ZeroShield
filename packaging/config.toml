@@ -94,3 +94,24 @@ blocklist = []
 [storage]
 # Override the SQLite database location (default: <data_dir>/zeroshield.db).
 # path = "/var/lib/zeroshield/zeroshield.db"
+
+[daemon]
+# Client authorization for the daemon socket (M9-C). The daemon always
+# trusts root and its own user; identity comes from the kernel
+# (SO_PEERCRED), never from client-supplied data.
+# Extra uids/gids with full access and no polkit prompt (gids cover the
+# primary group and supplementary groups).
+client_uids = []
+client_gids = []
+# Ask polkit for untrusted local users instead of denying them:
+# `pkcheck --action-id org.zeroshield.{read,manage} --process <pid>,<start>,<uid>`.
+# Requests are denied when polkit is unreachable (fail-closed).
+polkit_enabled = true
+polkit_helper = "pkcheck"
+# Let polkit open an authentication agent (GUI password prompts). Off by
+# default so checks never block waiting for input.
+# polkit_allow_interaction = true
+# Socket permissions (octal). "0660" = owner only (default). Set "0666"
+# together with polkit to let any local user attempt a request; every
+# untrusted request is then authorized individually.
+socket_mode = "0660"

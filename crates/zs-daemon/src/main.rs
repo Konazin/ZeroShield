@@ -3,6 +3,7 @@
 //! Owns the engines (scanner, process monitor, network guard), persists
 //! events in SQLite and serves the CLI/GUI over a unix socket.
 
+mod auth;
 mod handler;
 mod logging;
 mod watch;
@@ -18,7 +19,7 @@ use zs_core::error::{ZsError, ZsResult};
 use zs_core::event::Event;
 use zs_core::paths::Paths;
 use zs_core::storage::Storage;
-use zs_core::util::{is_root, now_secs};
+use zs_core::util::{euid, is_root, now_secs};
 use zs_ipc::protocol::methods;
 use zs_ipc::Server;
 use zs_net::NetGuard;
@@ -136,6 +137,17 @@ async fn async_main(paths: Paths, cfg: Config, cfg_path: Option<PathBuf>) -> ZsR
         storage.clone(),
         events_tx.clone(),
     ));
+    // Client authorization (M9-C): peer credentials from the kernel plus
+    // optional polkit checks for users outside the trust lists.
+    let auth = Arc::new(auth::AuthPolicy::new(auth::AuthConfig {
+        daemon_uid: euid(),
+        client_uids: cfg.daemon.client_uids.clone(),
+        client_gids: cfg.daemon.client_gids.clone(),
+        polkit_enabled: cfg.daemon.polkit_enabled,
+        polkit_helper: cfg.daemon.polkit_helper.clone(),
+        polkit_allow_interaction: cfg.daemon.polkit_allow_interaction,
+    }));
+    tracing::info!("authorization: {}", auth.describe());
     let state = Arc::new(handler::State {
         version: zs_core::VERSION.to_string(),
         started_at: now_secs(),
@@ -151,12 +163,28 @@ async fn async_main(paths: Paths, cfg: Config, cfg_path: Option<PathBuf>) -> ZsR
         watch_cfg: cfg.watch.clone(),
         shutdown: shutdown.clone(),
         events: events_tx.clone(),
+        auth,
     });
 
+    let socket_mode = match cfg.daemon.socket_mode_bits() {
+        Ok(bits) => bits,
+        Err(e) => {
+            tracing::warn!("{e}; falling back to 0660 (owner only)");
+            0o660
+        }
+    };
+    if socket_mode & 0o007 != 0 {
+        tracing::warn!(
+            "socket mode {:04o} lets other local users connect: every request is checked \
+             against daemon.client_uids/client_gids/polkit",
+            socket_mode
+        );
+    }
     let server = Server::bind_with_events(
         socket_path.clone(),
         handler::build(state.clone()),
         events_tx.clone(),
+        socket_mode,
     )?;
     let events = server.events();
 

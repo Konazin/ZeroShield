@@ -49,6 +49,8 @@ package() {
         "$pkgdir/usr/lib/systemd/system/zeroshield-metrics.timer"
     install -Dm644 packaging/tmpfiles/zeroshield.conf \
         "$pkgdir/usr/lib/tmpfiles.d/zeroshield.conf"
+    install -Dm644 packaging/polkit/org.zeroshield.policy \
+        "$pkgdir/usr/share/polkit-1/actions/org.zeroshield.policy"
 
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

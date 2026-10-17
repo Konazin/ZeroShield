@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+
+  <!-- ZeroShield daemon (zeroshieldd) actions.
+       The daemon checks these per request for clients that are not root, the
+       daemon user or explicitly listed in daemon.client_uids/client_gids.
+       See docs/architecture.md ("Autorização (M9-C)"). -->
+
+  <vendor>ZeroShield</vendor>
+  <vendor_url>https://github.com/Konazin/ZeroShield</vendor_url>
+
+  <action id="org.zeroshield.read">
+    <description>Read ZeroShield status, scans, events and findings</description>
+    <message>Authentication is required to read ZeroShield data</message>
+    <defaults>
+      <!-- Active local sessions (the desktop user) read without a prompt;
+           remote/inactive sessions are refused. -->
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.zeroshield.manage">
+    <description>Manage ZeroShield (quarantine, signatures, rules, network guard)</description>
+    <message>Authentication is required to change ZeroShield state</message>
+    <defaults>
+      <!-- State changes always need an administrator; a successful
+           authentication is kept for a few minutes. -->
+      <allow_any>no</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+</policyconfig>

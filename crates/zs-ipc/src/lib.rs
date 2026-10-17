@@ -15,5 +15,5 @@ pub mod protocol;
 pub mod server;
 
 pub use client::Client;
-pub use protocol::{methods, EventEnvelope, Frame, Request, Response};
+pub use protocol::{methods, EventEnvelope, Frame, PeerCred, Request, Response};
 pub use server::{FrameTx, Handler, HandlerFuture, Server};

@@ -18,12 +18,71 @@ use crate::paths::Paths;
 #[serde(default)]
 pub struct Config {
     pub general: GeneralConfig,
+    pub daemon: DaemonConfig,
     pub scanner: ScannerConfig,
     pub procmon: ProcMonConfig,
     pub netguard: NetGuardConfig,
     pub watch: WatchConfig,
     pub automount: AutomountConfig,
     pub storage: StorageConfig,
+}
+
+/// Client authorization for the daemon socket (M9-C).
+///
+/// The daemon always trusts root and its own user; everyone else is either
+/// listed here or (when reachable at all, i.e. with a permissive
+/// `socket_mode`) checked through polkit per request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DaemonConfig {
+    /// Extra UIDs with full access (no polkit prompt).
+    pub client_uids: Vec<u32>,
+    /// Extra GIDs with full access (primary or supplementary group).
+    pub client_gids: Vec<u32>,
+    /// Ask polkit (via `polkit_helper`) for untrusted local users instead of
+    /// denying them outright.
+    pub polkit_enabled: bool,
+    /// Binary used for the polkit check (`pkcheck` compatible).
+    pub polkit_helper: String,
+    /// Pass `--allow-user-interaction` so an authentication agent can prompt
+    /// (useful for the GUI; keeps `pkcheck` from blocking otherwise).
+    pub polkit_allow_interaction: bool,
+    /// Socket mode as an octal string. `"0660"` (default) keeps the socket
+    /// owner-only; `"0666"` lets any local user connect, with every
+    /// untrusted request checked individually.
+    pub socket_mode: String,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            client_uids: Vec::new(),
+            client_gids: Vec::new(),
+            polkit_enabled: true,
+            polkit_helper: "pkcheck".into(),
+            polkit_allow_interaction: false,
+            socket_mode: "0660".into(),
+        }
+    }
+}
+
+impl DaemonConfig {
+    /// Parse `socket_mode` (octal) into a Unix permission bits value.
+    pub fn socket_mode_bits(&self) -> ZsResult<u32> {
+        let bits = u32::from_str_radix(self.socket_mode.trim(), 8).map_err(|_| {
+            ZsError::Config(format!(
+                "daemon.socket_mode must be an octal mode like \"0660\" (got {:?})",
+                self.socket_mode
+            ))
+        })?;
+        if bits == 0 || bits > 0o777 {
+            return Err(ZsError::Config(format!(
+                "daemon.socket_mode must be between 0001 and 0777 (got {:?})",
+                self.socket_mode
+            )));
+        }
+        Ok(bits)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +377,9 @@ impl Config {
                 "automount.poll_interval_secs must be > 0".into(),
             ));
         }
+        // Reject a malformed daemon.socket_mode early (the daemon would
+        // otherwise have to fall back to the restrictive default).
+        self.daemon.socket_mode_bits()?;
         Ok(())
     }
 
@@ -344,6 +406,25 @@ mod tests {
     }
 
     #[test]
+    fn socket_mode_defaults_to_owner_only() {
+        let cfg = DaemonConfig::default();
+        assert_eq!(cfg.socket_mode_bits().unwrap(), 0o660);
+        assert!(cfg.client_uids.is_empty());
+        assert!(cfg.client_gids.is_empty());
+    }
+
+    #[test]
+    fn socket_mode_validation_rejects_garbage() {
+        let mut cfg = Config::default();
+        cfg.daemon.socket_mode = "660".into(); // octal without the 0 prefix
+        assert_eq!(cfg.daemon.socket_mode_bits().unwrap(), 0o660);
+        for bad in ["08", "07777", "0000", "rw-", ""] {
+            cfg.daemon.socket_mode = bad.into();
+            assert!(cfg.validate().is_err(), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
     fn parses_partial_toml() {
         let text = r#"
 [scanner]
@@ -355,6 +436,11 @@ mode = "block"
 dns_mode = "dnsmasq"
 feed_signature_required = true
 feed_keyring = "/tmp/feeds.gpg"
+
+[daemon]
+client_uids = [1000, 1001]
+client_gids = [984]
+socket_mode = "0666"
 
 [watch]
 enabled = true
@@ -374,6 +460,12 @@ roots = ["/media"]
         assert_eq!(cfg.netguard.dns_mode, DnsMode::Dnsmasq);
         assert!(cfg.netguard.feed_signature_required);
         assert_eq!(cfg.netguard.feed_keyring, PathBuf::from("/tmp/feeds.gpg"));
+        assert_eq!(cfg.daemon.client_uids, vec![1000, 1001]);
+        assert_eq!(cfg.daemon.client_gids, vec![984]);
+        assert!(cfg.daemon.polkit_enabled, "on by default");
+        assert_eq!(cfg.daemon.polkit_helper, "pkcheck");
+        assert!(!cfg.daemon.polkit_allow_interaction);
+        assert_eq!(cfg.daemon.socket_mode_bits().unwrap(), 0o666);
         assert!(cfg.watch.enabled);
         assert_eq!(cfg.watch.paths.len(), 2);
         assert!(cfg.watch.quarantine);

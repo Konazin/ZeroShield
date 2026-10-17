@@ -13,7 +13,7 @@ use zs_core::error::{ZsError, ZsResult};
 use zs_core::event::Event;
 
 use crate::protocol::{
-    EventEnvelope, Frame, Request, Response, MAX_FRAME_BYTES, MAX_INFLIGHT_REQUESTS,
+    EventEnvelope, Frame, PeerCred, Request, Response, MAX_FRAME_BYTES, MAX_INFLIGHT_REQUESTS,
 };
 
 /// Sender for frames on a single connection (used to stream events while a
@@ -21,7 +21,10 @@ use crate::protocol::{
 pub type FrameTx = mpsc::UnboundedSender<Frame>;
 
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Response> + Send>>;
-pub type Handler = Arc<dyn Fn(Request, FrameTx) -> HandlerFuture + Send + Sync + 'static>;
+pub type Handler = Arc<dyn Fn(Request, FrameTx, PeerCred) -> HandlerFuture + Send + Sync + 'static>;
+
+/// Socket permissions for daemons that trust the default (owner-only).
+pub const DEFAULT_SOCKET_MODE: u32 = 0o660;
 
 pub struct Server {
     listener: UnixListener,
@@ -34,7 +37,7 @@ impl Server {
     /// Bind the socket. Removes a stale socket file if no daemon answers.
     pub fn bind(path: impl Into<PathBuf>, handler: Handler) -> ZsResult<Self> {
         let (events, _) = broadcast::channel(512);
-        Self::bind_with_events(path, handler, events)
+        Self::bind_with_events(path, handler, events, DEFAULT_SOCKET_MODE)
     }
 
     /// Like [`Server::bind`], but reusing a caller-provided broadcast channel
@@ -43,6 +46,7 @@ impl Server {
         path: impl Into<PathBuf>,
         handler: Handler,
         events: broadcast::Sender<Event>,
+        socket_mode: u32,
     ) -> ZsResult<Self> {
         let path = path.into();
         if let Some(parent) = path.parent() {
@@ -60,7 +64,7 @@ impl Server {
             std::fs::remove_file(&path).map_err(|e| ZsError::io(&path, e))?;
         }
         let listener = UnixListener::bind(&path).map_err(|e| ZsError::io(&path, e))?;
-        restrict_permissions(&path)?;
+        set_socket_mode(&path, socket_mode)?;
         Ok(Self {
             listener,
             path,
@@ -119,11 +123,13 @@ impl Server {
     }
 }
 
-fn restrict_permissions(path: &Path) -> ZsResult<()> {
+fn set_socket_mode(path: &Path, mode: u32) -> ZsResult<()> {
     use std::os::unix::fs::PermissionsExt;
-    // Owner + group only. A system (root) daemon is reachable to root, while
-    // user daemons live inside a 0700 runtime directory.
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
+    // 0660 by default: the socket owner (root for the system daemon, the
+    // user for user daemons) gets access. A more permissive mode makes
+    // every untrusted request subject to the per-request authorization
+    // (see the daemon's auth policy).
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o777))
         .map_err(|e| ZsError::io(path, e))
 }
 
@@ -153,6 +159,17 @@ async fn serve_connection_with_limits(
     max_frame_bytes: usize,
     max_inflight: usize,
 ) -> ZsResult<()> {
+    // Kernel-provided identity of the client. When the kernel cannot report
+    // it, the connection gets a placeholder credential that matches nothing
+    // (the daemon then refuses requests, fail-closed).
+    let cred = match stream.peer_cred() {
+        Ok(cred) => PeerCred::from(cred),
+        Err(e) => {
+            tracing::warn!("cannot read peer credentials, treating as unknown: {e}");
+            PeerCred::unknown()
+        }
+    };
+
     let (rd, mut wr) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
 
@@ -247,7 +264,7 @@ async fn serve_connection_with_limits(
         let tx_req = tx.clone();
         tokio::spawn(async move {
             let id = request.id;
-            let mut response = handler(request, tx_req.clone()).await;
+            let mut response = handler(request, tx_req.clone(), cred).await;
             if response.id != id {
                 response.id = id;
             }
@@ -272,7 +289,7 @@ mod tests {
     use zs_core::model::Severity;
 
     fn echo_handler() -> Handler {
-        Arc::new(|req: Request, tx: FrameTx| {
+        Arc::new(|req: Request, tx: FrameTx, cred: PeerCred| {
             Box::pin(async move {
                 // Stream one info event, then answer.
                 let _ = tx.send(Frame::Event(EventEnvelope::new(Event::Info {
@@ -280,11 +297,37 @@ mod tests {
                 })));
                 if req.method == "fail" {
                     Response::err(req.id, "boom")
+                } else if req.method == "cred" {
+                    Response::ok(
+                        req.id,
+                        serde_json::json!({"uid": cred.uid, "gid": cred.gid, "pid": cred.pid}),
+                    )
                 } else {
                     Response::ok(req.id, serde_json::json!({"echo": req.params}))
                 }
             })
         })
+    }
+
+    #[tokio::test]
+    async fn handler_receives_kernel_peer_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("cred.sock");
+
+        let server = Server::bind(&sock, echo_handler()).unwrap();
+        let server_task = tokio::spawn(async move { server.run(std::future::pending()).await });
+        let mut client = Client::connect(&sock).await.unwrap();
+        let cred = client
+            .call_simple("cred", serde_json::json!({}))
+            .await
+            .unwrap()
+            .into_result()
+            .unwrap();
+
+        assert_eq!(cred["uid"], zs_core::util::euid());
+        assert_eq!(cred["gid"], zs_core::util::egid());
+        assert_eq!(cred["pid"], std::process::id());
+        server_task.abort();
     }
 
     #[tokio::test]
@@ -405,7 +448,7 @@ mod tests {
     }
 
     fn slow_handler() -> Handler {
-        Arc::new(|req: Request, _tx: FrameTx| {
+        Arc::new(|req: Request, _tx: FrameTx, _cred: PeerCred| {
             Box::pin(async move {
                 if req.method == "slow" {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

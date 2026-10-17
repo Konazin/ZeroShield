@@ -71,6 +71,12 @@ pub fn euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Current effective gid.
+pub fn egid() -> u32 {
+    // SAFETY: getegid is always safe to call.
+    unsafe { libc::getegid() }
+}
+
 pub fn is_root() -> bool {
     euid() == 0
 }

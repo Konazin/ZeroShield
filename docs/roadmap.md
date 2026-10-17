@@ -19,8 +19,8 @@ falta.
 - [x] Broadcast de eventos + `watch.start` com stream contínuo
 - [x] Dispatch de métodos (status, scan, proc, quarentena, rules, net)
 - [x] Logging (texto/JSON) e shutdown gracioso (SIGTERM/SIGINT)
-- [ ] Autorização por polkit para clientes não-root (M9)
-- [ ] Autenticação por peer-credentials (SO_PEERCRED)
+- [x] Autorização por polkit para clientes não-root (M9-C)
+- [x] Autenticação por peer-credentials (SO_PEERCRED)
 
 ## M2 — Scanner de arquivos ✅
 
@@ -62,7 +62,8 @@ falta.
 - [x] Código-fonte escrito e revisado
 - [ ] Compilar/validar em máquina com `libgtk-4-dev`/`libadwaita-1-dev`
       (a CI tem job dedicado)
-- [ ] Integração com polkit para operar sem rodar como root
+- [x] Integração com polkit para operar sem rodar como root (via daemon,
+      M9-C: `polkit_allow_interaction = true` mostra o prompt no desktop)
 
 ## M6 — Empacotamento e CI ✅
 
@@ -109,7 +110,9 @@ falta.
 
 ## M9 — Hardening e v1.0
 
-- [ ] polkit + dbus para CLI/GUI sem privilégio
+- [x] polkit + dbus para CLI/GUI sem privilégio (M9-C: autorização por
+      `SO_PEERCRED` + polkit via helper `pkcheck`, sem dependência de D-Bus
+      no build; ações `org.zeroshield.read|manage`, fail-closed)
 - [ ] Backend eBPF real (processos em tempo real, sem polling)
 - [x] Assinatura de feeds (GPG) e atualização incremental (`gpgv` +
       keyring próprio, `ETag`/`If-Modified-Since` com `304`, fail-closed:

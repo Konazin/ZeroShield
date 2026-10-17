@@ -18,7 +18,10 @@ TimeoutStopSec=20
 User=root
 
 RuntimeDirectory=zeroshield
-RuntimeDirectoryMode=0700
+# 0755 so non-root users can reach the socket when the administrator
+# opts in (daemon.socket_mode = "0666" + polkit); the socket itself stays
+# owner-only by default.
+RuntimeDirectoryMode=0755
 StateDirectory=zeroshield
 StateDirectoryMode=0700
 ConfigurationDirectory=zeroshield

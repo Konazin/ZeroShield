@@ -5,6 +5,52 @@ use serde::{Deserialize, Serialize};
 use zs_core::error::{ZsError, ZsResult};
 use zs_core::event::Event;
 
+/// Kernel-provided credentials of the client end of a connection
+/// (`SO_PEERCRED`). They come from the kernel, never from client-supplied
+/// data, so they are safe to base authorization on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCred {
+    pub uid: u32,
+    pub gid: u32,
+    /// Client process id (0 when the platform does not report it).
+    pub pid: u32,
+}
+
+impl PeerCred {
+    /// Fail-closed placeholder for when the kernel cannot report
+    /// credentials: matches no user and carries no pid.
+    pub fn unknown() -> Self {
+        Self {
+            uid: u32::MAX,
+            gid: u32::MAX,
+            pid: 0,
+        }
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        self.uid == u32::MAX && self.pid == 0
+    }
+}
+
+impl From<tokio::net::unix::UCred> for PeerCred {
+    fn from(cred: tokio::net::unix::UCred) -> Self {
+        // `pid()` exists on Linux; elsewhere the kernel does not expose the
+        // peer pid and it stays 0 (authorization then refuses polkit).
+        #[cfg(target_os = "linux")]
+        let pid = cred
+            .pid()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .unwrap_or(0);
+        #[cfg(not(target_os = "linux"))]
+        let pid = 0;
+        Self {
+            uid: cred.uid(),
+            gid: cred.gid(),
+            pid,
+        }
+    }
+}
+
 /// Request method names understood by the daemon.
 pub mod methods {
     pub const STATUS: &str = "status";
